@@ -1,0 +1,35 @@
+gateway:
+  listen_host: "0.0.0.0"
+  listen_port: 8080
+  public_base_url: "http://localhost:8080"
+  api_key: "change-me"
+  rate_limit_per_minute: 120
+
+logging:
+  stdout_json: true
+
+cache:
+  enabled: true
+  max_entries: 10000
+  default_ttl_minutes: 60
+  client_scoped_tools: []
+
+upstreams:
+  - id: "context7"
+    name: "context7"
+    transport: "stdio"
+    command: ["npx", "-y", "@upstash/context7-mcp"]
+    env: {}
+    deny_tools: []
+    tool_routes:
+      - "context7."
+
+  - id: "endor-cli-tools"
+    name: "endor-cli-tools"
+    transport: "stdio"
+    command: ["npx", "-y", "endorctl", "ai-tools", "mcp-server"]
+    env: {}
+    timeout_ms: 180000
+    deny_tools: []
+    tool_routes:
+      - "endor."

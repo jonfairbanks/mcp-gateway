@@ -1,0 +1,2 @@
+[console_scripts]
+gateway = mcp_gateway.cli:main
