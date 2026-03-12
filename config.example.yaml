@@ -1,7 +1,6 @@
 gateway:
   listen_host: "0.0.0.0"
   listen_port: 8080
-  public_base_url: "http://localhost:8080"
   api_key: "change-me"
   rate_limit_per_minute: 120
 
@@ -33,3 +32,29 @@ upstreams:
     deny_tools: []
     tool_routes:
       - "endor."
+
+  - id: "notion"
+    name: "notion"
+    transport: "stdio"
+    command: ["npx", "-y", "@notionhq/notion-mcp-server"]
+    env:
+      NOTION_TOKEN: "ntn_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    deny_tools:
+      - "API-post-page"
+      - "API-patch-page"
+    tool_routes:
+      - "notion."
+
+  - id: "aws-mcp"
+    name: "aws-mcp"
+    transport: "stdio"
+    command: "uvx"
+    args:
+      - "mcp-proxy-for-aws@latest"
+      - "https://aws-mcp.us-east-1.api.aws/mcp"
+      - "--metadata"
+      - "AWS_REGION=us-east-1"
+    env: {}
+    deny_tools: []
+    tool_routes:
+      - "aws."
