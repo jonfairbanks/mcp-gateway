@@ -353,13 +353,13 @@ class Gateway:
                         continue
                     if name not in upstream_tool_names:
                         upstream_tool_names.append(name)
+                    # Keep full registry (including denied tools) so tools/call can
+                    # be routed and then explicitly denied with a clear error message.
+                    registry[name] = upstream.id
                     if name in seen:
-                        continue
-                    if name in upstream.deny_tools:
                         continue
                     seen.add(name)
                     tools.append(tool)
-                    registry[name] = upstream.id
                 upstream_tools[upstream.id] = upstream_tool_names
             merged["tools"] = tools
             async with self._registry_lock:
@@ -542,8 +542,9 @@ class Gateway:
                     tool_names = [t.get("name") for t in tools if isinstance(t, dict) and isinstance(t.get("name"), str)]
                     tools_list_success = True
                     for tool_name in tool_names:
-                        if tool_name not in upstream.deny_tools:
-                            registry_updates[tool_name] = upstream.id
+                        # Keep denied tools in the registry so tool invocations can be
+                        # rejected by policy with an explicit deny response.
+                        registry_updates[tool_name] = upstream.id
                 else:
                     tools_list_success = False
                     tools_list_error = tools_response.payload.get("error") if isinstance(tools_response.payload, dict) else None
