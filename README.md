@@ -1,97 +1,53 @@
 # MCP Gateway
 
-`mcp-gateway` is an HTTP-hosted MCP proxy that lets clients connect to one MCP server while you route to many upstream MCP servers.
+`mcp-gateway` is an HTTP MCP proxy that gives clients one endpoint while routing to many upstream MCP servers.
 
-This project is built for multi-client deployments (for example, Codex/Claude users pointing at one shared gateway) with policy controls, observability, and resilience features.
-
-## What It Does
-
-- Exposes one HTTP MCP endpoint for clients.
-- Connects to multiple upstream MCP servers (`stdio` and HTTP JSON-RPC endpoints).
-- Aggregates discovery calls (`tools/list`, `resources/list`, `resources/templates/list`, `prompts/list`).
-- Routes `tools/call` to the correct upstream using a learned tool registry.
-- Enforces per-upstream deny lists for tools.
-- Caches successful `tools/call` responses with TTL.
-- Logs requests/responses/denials to Postgres and structured stdout.
-- Applies per-upstream health counters, concurrency limits, and circuit breakers.
-- Runs startup warmup to initialize upstreams and pre-discover tools.
-
-## Architecture
-
-Client -> MCP Gateway (HTTP) -> Upstream MCP servers
+It is designed for shared deployments with policy controls, caching, and observability.
 
 ![MCP Gateway Architecture](docs/mcp-gateway-architecture.png)
 
-Gateway behavior:
+## Key Features
 
-- `initialize`: fan-out to all upstreams and merge capabilities.
-- `notifications/initialized`: fan-out fire-and-forget.
-- `tools/list`: fan-out and merge tools, then build `tool_name -> upstream_id` registry.
-- `tools/call`: denylist check -> cache lookup -> upstream call -> cache write.
-
-## Install
-
-```bash
-pip install .
-```
-
-Run:
-
-```bash
-mcp-gateway serve --config /path/to/config.yaml
-```
+- Multi-upstream routing (`stdio` and HTTP upstreams).
+- Tool discovery aggregation (`tools/list`, `resources/list`, `resources/templates/list`, `prompts/list`).
+- Per-upstream deny policies with explicit policy-denied errors.
+- Response caching for successful `tools/call`.
+- Structured logs + Postgres request/response/denial/cache tables.
+- Startup warmup and per-upstream health counters.
 
 ## Quick Start
 
-1. Create config from [`config.example.yaml`](config.example.yaml).
-2. Initialize database schema:
+1. Copy and edit [`config.example.yaml`](config.example.yaml).
+2. Initialize Postgres schema:
 
 ```bash
 psql "$DATABASE_URL" -f schema.sql
 ```
 
-3. Start gateway:
+3. Install and run:
 
 ```bash
+pip install .
 DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway' \
   mcp-gateway serve --config /path/to/config.yaml
 ```
 
-Most settings are optional. `config.example.yaml` intentionally keeps only required fields.
+For `stdio` upstreams, prefer `command` + `args`:
 
-Default values for common settings:
-
-- `gateway.listen_host`: `0.0.0.0`
-- `gateway.listen_port`: `8080`
-- `gateway.request_max_bytes`: `1048576` (1 MB)
-- `gateway.rate_limit_per_minute`: `120`
-- `cache.default_ttl_minutes`: `60`
-- `upstreams[].timeout_ms`: `10000`
-- `upstreams[].stdio_read_limit_bytes`: `104857600` (100 MB)
-
-## Docker Deployment
-
-Use the included Docker assets:
-
-- [`Dockerfile`](Dockerfile)
-- [`docker-compose.yml`](docker-compose.yml)
-
-Start gateway + Postgres:
-
-```bash
-docker compose up --build
+```yaml
+- id: "notion"
+  transport: "stdio"
+  command: "npx"
+  args: ["-y", "@notionhq/notion-mcp-server"]
+  env:
+    NOTION_TOKEN: "ntn_***"
 ```
 
-Default endpoints:
+## Client Setup
 
-- Gateway: `http://localhost:8080`
-- Postgres: `postgresql://postgres:postgres@localhost:5432/mcp_gateway`
+Point your MCP client to `/mcp` and include bearer auth.
 
-## Client Configuration
-
-Point clients at the gateway URL and include bearer auth.
-
-Codex example:
+#### Codex example:
 
 ```toml
 [mcp_servers.mcp-gateway]
@@ -99,125 +55,52 @@ url = "http://localhost:8080/mcp"
 http_headers = { "Authorization" = "Bearer change-me" }
 ```
 
-Notes:
+#### Claude example:
 
-- Client-side tool names may appear as `mcp__mcp-gateway__<tool>`.
-- Upstream/original tool names remain unchanged inside gateway routing and policies.
+```json
+{
+  "mcpServers": {
+    "mcp-gateway": {
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer change-me"
+      }
+    }
+  }
+}
+```
 
-## Configuration Reference
+## Endpoints
 
-Top-level config:
+- `POST /mcp` JSON-RPC MCP endpoint.
+- `GET /tools` upstream tool catalog (`tools`, `exposed_tools`, `deny_tools`).
+- `GET /metrics` Prometheus/OpenMetrics metrics.
+- `GET /healthz` liveness + warmup/breaker status.
+- `GET /readyz` readiness (`503` until at least one upstream initializes).
+- `GET /sse` and `POST /message` for streamable MCP sessions.
 
-- `gateway.listen_host`: bind host.
-- `gateway.listen_port`: bind port.
-- `gateway.api_key`: required bearer token for client requests.
-- `gateway.trusted_proxies`: source IPs allowed to supply `X-Forwarded-For`.
-- `gateway.request_max_bytes`: max HTTP body size.
-- `gateway.rate_limit_per_minute`: request limit per client id/IP per minute.
-- `gateway.circuit_breaker_fail_threshold`: global breaker threshold.
-- `gateway.circuit_breaker_open_seconds`: global breaker open duration.
+## Docker
 
-Cache:
+```bash
+docker compose up --build
+```
 
-- `cache.enabled`: enable/disable cache.
-- `cache.max_entries`: in-memory cache size.
-- `cache.default_ttl_minutes`: default tool cache TTL.
-- `cache.client_scoped_tools`: tools whose cache key includes `client_id`.
+Default local endpoints:
 
-Per upstream:
+- Gateway: `http://localhost:8080`
+- Postgres: `postgresql://postgres:postgres@localhost:5432/mcp_gateway`
 
-- `id`, `name`
-- `transport`: `stdio` or `http_sse`.
-- `command` for `stdio` upstreams (string or list) plus optional `args`, `env`, `cwd`.
-- `endpoint` for `http_sse` upstreams (JSON-RPC POST endpoint).
-- `http_headers`: optional static headers sent to HTTP upstream requests.
-- `bearer_token_env_var`: env var name for bearer token (applied when `Authorization` is not in `http_headers`).
-- `timeout_ms`
-- `stdio_read_limit_bytes`: max bytes for one upstream stdout line (default `104857600` / 100 MB).
-- `max_in_flight`: concurrency cap per upstream.
-- `deny_tools`: exact tool names to block.
-- `cache_ttl_minutes`: optional override.
-- `tool_routes`: optional prefix routing hints.
-- `circuit_breaker_fail_threshold`, `circuit_breaker_open_seconds`: per-upstream overrides.
+## Docs
 
-## HTTP Endpoints
-
-- `POST /mcp`: JSON-RPC request/response.
-- `GET /tools`: gateway view of upstream tool catalogs (`tools`, `exposed_tools`, `deny_tools` per upstream).
-- `GET /metrics`: Prometheus/OpenMetrics text endpoint for scraping.
-- `GET /sse`: open SSE stream session.
-- `POST /message?session_id=...`: send JSON-RPC and stream result via SSE.
-- `GET /healthz`: liveness plus warmup/breaker status.
-- `GET /readyz`: readiness (`503` until at least one upstream initializes successfully).
-
-## Observability
-
-Structured logs include:
-
-- `mcp_request`, `mcp_response`, `mcp_denied`
-- `upstream_health` with per-method success/fail counters
-- `upstream_warmup` with discovered tools per upstream
-- `upstream_process_log` tagged with `upstream_id` and `stream` (currently `stderr`)
-
-Gateway metrics exposed at `/metrics`:
-
-- `mcp_gateway_requests_total`
-- `mcp_gateway_responses_total`
-- `mcp_gateway_response_latency_ms`
-- `mcp_gateway_denials_total`
-- `mcp_gateway_upstream_calls_total`
-
-Tool observability fields:
-
-- `tool_name`: original MCP tool name
-- `tool_alias`: synthetic `<upstream_id>.<tool_name>` alias for log clarity
-
-Database tables in [`schema.sql`](schema.sql):
-
-- `mcp_requests`
-- `mcp_responses`
-- `mcp_denials`
-- `mcp_cache`
-
-## Policy and Safety
-
-- Denylists are enforced before upstream invocation.
-- Denied tool calls return JSON-RPC `-32001` with structured `error.data` (`category=policy_denied`, `upstream_id`, `tool_name`, `retryable=false`).
-- Cache only applies to `tools/call` successes.
-- Notifications are handled as non-blocking upstream notifications.
-- Circuit breakers protect the gateway from repeated upstream failures.
-
-## Known MCP Behavior
-
-Some MCP servers expose only tools and no resources/templates.
-
-Expected outcome in that case:
-
-- `tools/list` returns tools.
-- `resources/list` may return empty.
-- `resources/templates/list` may return empty or `-32601` upstream; gateway treats optional method absence as non-fatal for aggregate discovery.
+- Configuration reference: [`docs/configuration.md`](docs/configuration.md)
+- Database schema: [`schema.sql`](schema.sql)
 
 ## Troubleshooting
 
-If tools do not appear in client:
-
-1. Confirm client points to gateway URL (`/mcp`) and sends `Authorization: Bearer <api_key>`.
-2. Check warmup logs for each upstream (`event=upstream_warmup`).
-3. Check discovery logs (`method=tools/list`) and ensure aggregate success.
-4. Review `upstream_process_log` logs for auth/permission errors.
-
-If a specific upstream tool set is missing:
-
-1. Verify upstream can initialize and answer `tools/list` directly.
-2. Confirm denylist is not filtering those tools.
-3. Confirm upstream auth context is valid (for example, CLI login/token state for CLI-based MCP servers).
-
-## Development Notes
-
-- Runtime mode is HTTP-only (`mcp-gateway serve`).
-- Upstream transports remain mixed (`stdio` and HTTP endpoint upstreams are both supported).
-- Python version: 3.11+
+- If tools are missing, check `upstream_warmup` and `tools/list` logs.
+- If a tool call is blocked, look for JSON-RPC `-32001` with `error.data.category = policy_denied`.
+- If auth fails, verify `Authorization: Bearer <api_key>` matches `gateway.api_key`.
 
 ## License
 
-MIT (see project metadata in [`pyproject.toml`](pyproject.toml)).
+MIT (see [`pyproject.toml`](pyproject.toml)).
