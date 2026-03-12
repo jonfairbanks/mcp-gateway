@@ -180,20 +180,22 @@ class Gateway:
         return resolved or requested_tool_name
 
     def _log_upstream_stderr(self, upstream_id: str, line: str) -> None:
+        event_name = "upstream_process_log"
+        base_fields = {"upstream_id": upstream_id, "stream": "stderr", "line": line}
         lowered = line.lower()
         error_markers = (" error ", "\terror\t", "fatal", "panic", "exception", "traceback")
         warn_markers = (" warn ", "\twarn\t", "deprecated", "deprecation", "retrying", "rate limit")
         info_markers = (" info ", "\tinfo\t", "running on stdio", "starting stdio server", "initialized")
         if any(marker in lowered for marker in error_markers):
-            self._logger.error("upstream_stderr", upstream_id=upstream_id, line=line)
+            self._logger.error(event_name, **base_fields)
             return
         if any(marker in lowered for marker in warn_markers):
-            self._logger.warn("upstream_stderr", upstream_id=upstream_id, line=line)
+            self._logger.warn(event_name, **base_fields)
             return
         if any(marker in lowered for marker in info_markers):
-            self._logger.info("upstream_stderr", upstream_id=upstream_id, line=line)
+            self._logger.info(event_name, **base_fields)
             return
-        self._logger.warn("upstream_stderr", upstream_id=upstream_id, line=line)
+        self._logger.warn(event_name, **base_fields)
 
     def _merge_dicts(self, base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
         out = dict(base)

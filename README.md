@@ -153,7 +153,7 @@ Structured logs include:
 - `mcp_request`, `mcp_response`, `mcp_denied`
 - `upstream_health` with per-method success/fail counters
 - `upstream_warmup` with discovered tools per upstream
-- `upstream_stderr` tagged with `upstream_id`
+- `upstream_process_log` tagged with `upstream_id` and `stream` (currently `stderr`)
 
 Tool observability fields:
 
@@ -191,7 +191,7 @@ If tools do not appear in client:
 1. Confirm client points to gateway URL (`/mcp`) and sends `Authorization: Bearer <api_key>`.
 2. Check warmup logs for each upstream (`event=upstream_warmup`).
 3. Check discovery logs (`method=tools/list`) and ensure aggregate success.
-4. Review `upstream_stderr` logs for auth/permission errors.
+4. Review `upstream_process_log` logs for auth/permission errors.
 
 If a specific upstream tool set is missing:
 
