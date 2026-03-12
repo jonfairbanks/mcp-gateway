@@ -108,7 +108,6 @@ Top-level config:
 
 - `gateway.listen_host`: bind host.
 - `gateway.listen_port`: bind port.
-- `gateway.public_base_url`: public URL for docs/ops usage.
 - `gateway.api_key`: required bearer token for client requests.
 - `gateway.trusted_proxies`: source IPs allowed to supply `X-Forwarded-For`.
 - `gateway.request_max_bytes`: max HTTP body size.
