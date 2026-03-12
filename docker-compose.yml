@@ -27,7 +27,7 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/mcp_gateway
     ports:
       - "8080:8080"
-    command: ["gateway", "serve-http", "--config", "/app/config.example.yaml"]
+    command: ["mcp-gateway", "serve", "--config", "/app/config.example.yaml"]
 
 volumes:
   pgdata:
