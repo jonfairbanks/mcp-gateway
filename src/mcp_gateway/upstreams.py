@@ -33,7 +33,7 @@ class HTTPUpstream:
         if self._session:
             await self._session.close()
 
-    def _request_headers(self) -> Dict[str, str]:
+    async def _request_headers(self) -> Dict[str, str]:
         headers = dict(self._headers)
         headers.setdefault("Content-Type", "application/json")
         headers.setdefault("Accept", "application/json, text/event-stream")
@@ -61,7 +61,7 @@ class HTTPUpstream:
 
         assert self._session
         async with self._lock:
-            async with self._session.post(self._endpoint, json=payload, headers=self._request_headers()) as resp:
+            async with self._session.post(self._endpoint, json=payload, headers=await self._request_headers()) as resp:
                 self._capture_session_headers(resp)
                 if resp.status == 202:
                     await resp.read()
@@ -109,7 +109,7 @@ class HTTPUpstream:
             await self.start()
         assert self._session
         async with self._lock:
-            async with self._session.post(self._endpoint, json=payload, headers=self._request_headers()) as resp:
+            async with self._session.post(self._endpoint, json=payload, headers=await self._request_headers()) as resp:
                 self._capture_session_headers(resp)
                 if resp.status >= 400:
                     body = await resp.text()
@@ -156,8 +156,19 @@ class StdioUpstream:
     async def close(self) -> None:
         if not self._process:
             return
-        self._process.terminate()
-        await self._process.wait()
+        if self._process.returncode is None:
+            try:
+                self._process.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                try:
+                    self._process.kill()
+                except ProcessLookupError:
+                    pass
+                await self._process.wait()
         if self._stderr_task:
             self._stderr_task.cancel()
             try:
@@ -175,12 +186,22 @@ class StdioUpstream:
         async with self._lock:
             self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
             await self._process.stdin.drain()
-            line = await asyncio.wait_for(self._process.stdout.readline(), timeout=self._timeout)
-            if not line:
-                raise RuntimeError("Upstream stdio closed")
-            data = json.loads(line.decode("utf-8"))
-            success = "error" not in data
-            return UpstreamResponse(payload=data, success=success)
+            expected_id = payload.get("id")
+            deadline = time.monotonic() + self._timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                line = await asyncio.wait_for(self._process.stdout.readline(), timeout=remaining)
+                if not line:
+                    raise RuntimeError("Upstream stdio closed")
+                data = json.loads(line.decode("utf-8"))
+                # Stdio upstreams may emit notifications/progress messages between requests.
+                # Keep reading until we receive the response for this request id.
+                if data.get("id") != expected_id:
+                    continue
+                success = "error" not in data
+                return UpstreamResponse(payload=data, success=success)
 
     async def notify(self, payload: Dict[str, Any]) -> None:
         await self.start()

@@ -36,6 +36,7 @@ class Gateway:
         self._stdio_upstreams: Dict[str, StdioUpstream] = {}
         self._upstream_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._tool_registry: Dict[str, str] = {}
+        self._tool_alias_registry: Dict[str, str] = {}
         self._registry_lock = asyncio.Lock()
         self._upstream_by_id: Dict[str, UpstreamConfig] = {u.id: u for u in config.upstreams}
         self._health_counters: Dict[str, Dict[str, Dict[str, int]]] = {}
@@ -131,6 +132,51 @@ class Gateway:
         if not upstream_id or not tool_name:
             return None
         return f"{upstream_id}.{tool_name}"
+
+    def _aliases_for_tool(self, upstream_id: str, tool_name: str) -> set[str]:
+        aliases: set[str] = {tool_name}
+        single = re.sub(r"[^A-Za-z0-9_-]", "_", tool_name)
+        triple = re.sub(r"[^A-Za-z0-9_-]", "___", tool_name)
+        aliases.update({single, triple})
+        aliases.update(
+            {
+                f"{upstream_id}_{single}",
+                f"{upstream_id}___{single}",
+                f"{upstream_id}_{triple}",
+                f"{upstream_id}___{triple}",
+            }
+        )
+        if tool_name.startswith(f"{upstream_id}."):
+            stripped = tool_name[len(upstream_id) + 1 :]
+            aliases.update(
+                {
+                    stripped,
+                    re.sub(r"[^A-Za-z0-9_-]", "_", stripped),
+                    re.sub(r"[^A-Za-z0-9_-]", "___", stripped),
+                }
+            )
+        return {alias for alias in aliases if alias}
+
+    def _build_tool_alias_registry(self, registry: Dict[str, str]) -> Dict[str, str]:
+        alias_to_tool: Dict[str, str] = {}
+        collisions: set[str] = set()
+        for tool_name, upstream_id in registry.items():
+            for alias in self._aliases_for_tool(upstream_id, tool_name):
+                if alias in collisions:
+                    continue
+                existing = alias_to_tool.get(alias)
+                if existing and existing != tool_name:
+                    alias_to_tool.pop(alias, None)
+                    collisions.add(alias)
+                    continue
+                alias_to_tool[alias] = tool_name
+        return alias_to_tool
+
+    def _resolve_tool_name(self, requested_tool_name: str) -> str:
+        if requested_tool_name in self._tool_registry:
+            return requested_tool_name
+        resolved = self._tool_alias_registry.get(requested_tool_name)
+        return resolved or requested_tool_name
 
     def _log_upstream_stderr(self, upstream_id: str, line: str) -> None:
         lowered = line.lower()
@@ -279,6 +325,7 @@ class Gateway:
             merged["tools"] = tools
             async with self._registry_lock:
                 self._tool_registry = registry
+                self._tool_alias_registry = self._build_tool_alias_registry(registry)
         elif method == "resources/list":
             seen = set()
             resources: list[Dict[str, Any]] = []
@@ -480,6 +527,7 @@ class Gateway:
         if registry_updates:
             async with self._registry_lock:
                 self._tool_registry.update(registry_updates)
+                self._tool_alias_registry = self._build_tool_alias_registry(self._tool_registry)
 
     async def handle(self, payload: Dict[str, Any], client_id: Optional[str]) -> GatewayResult:
         request_id = uuid4()
@@ -601,7 +649,21 @@ class Gateway:
                 request_id=request_id,
             )
 
-        tool_name = self._get_tool_name(method, params)
+        requested_tool_name = self._get_tool_name(method, params)
+        tool_name = requested_tool_name
+        if method == "tools/call" and tool_name:
+            async with self._registry_lock:
+                resolved = self._resolve_tool_name(tool_name)
+            if resolved != tool_name:
+                tool_name = resolved
+                params_copy = dict(params or {})
+                if "name" in params_copy:
+                    params_copy["name"] = tool_name
+                if "tool" in params_copy:
+                    params_copy["tool"] = tool_name
+                payload = dict(payload)
+                payload["params"] = params_copy
+                params = params_copy
         upstream = None
         if method == "tools/call" and tool_name:
             async with self._registry_lock:
@@ -645,6 +707,7 @@ class Gateway:
             method=method,
             upstream_id=upstream.id,
             tool_name=tool_name,
+            tool_name_requested=requested_tool_name,
             tool_alias=self._tool_alias(upstream.id, tool_name),
             client_id=client_id,
             cache_key=cache_key,

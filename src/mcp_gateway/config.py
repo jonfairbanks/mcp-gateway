@@ -66,6 +66,28 @@ def _get(data: Dict[str, Any], key: str, default: Any) -> Any:
     return value
 
 
+def _normalize_stdio_command(item: Dict[str, Any]) -> Optional[List[str]]:
+    command_raw = item.get("command")
+    args_raw = item.get("args", []) or []
+
+    if command_raw is None:
+        if args_raw:
+            raise ValueError("Upstream config uses 'args' but is missing 'command'")
+        return None
+
+    if isinstance(command_raw, str):
+        command: List[str] = [command_raw]
+    elif isinstance(command_raw, list):
+        command = [str(part) for part in command_raw]
+    else:
+        raise ValueError("Upstream 'command' must be a string or list of strings")
+
+    if not isinstance(args_raw, list):
+        raise ValueError("Upstream 'args' must be a list of strings")
+    command.extend(str(arg) for arg in args_raw)
+    return command
+
+
 def load_config(path: str) -> AppConfig:
     with open(path, "r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
@@ -106,6 +128,7 @@ def load_config(path: str) -> AppConfig:
                 endpoint=item.get("endpoint"),
                 http_headers=item.get("http_headers", {}) or {},
                 command=item.get("command"),
+                command=_normalize_stdio_command(item),
                 env=item.get("env", {}) or {},
                 cwd=item.get("cwd"),
                 timeout_ms=int(item.get("timeout_ms", 10000)),
