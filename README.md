@@ -36,7 +36,7 @@ pip install .
 Run:
 
 ```bash
-gateway serve-http --config /path/to/config.yaml
+mcp-gateway serve --config /path/to/config.yaml
 ```
 
 ## Quick Start
@@ -52,7 +52,7 @@ psql "$DATABASE_URL" -f schema.sql
 
 ```bash
 DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway' \
-  gateway serve-http --config /path/to/config.yaml
+  mcp-gateway serve --config /path/to/config.yaml
 ```
 
 Most settings are optional. `config.example.yaml` intentionally keeps only required fields.
@@ -201,7 +201,7 @@ If a specific upstream tool set is missing:
 
 ## Development Notes
 
-- Runtime mode is HTTP-only (`gateway serve-http`).
+- Runtime mode is HTTP-only (`mcp-gateway serve`).
 - Upstream transports remain mixed (`stdio` and HTTP endpoint upstreams are both supported).
 - Python version: 3.11+
 

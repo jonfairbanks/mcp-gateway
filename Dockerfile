@@ -9,8 +9,8 @@ COPY pyproject.toml README.md /app/
 COPY src /app/src
 RUN pip install --no-cache-dir .
 
-COPY config.example.yaml schema.sql /app/
+COPY config.yaml schema.sql /app/
 
 EXPOSE 8080
 
-CMD ["gateway", "serve-http", "--config", "/app/config.example.yaml"]
+CMD ["mcp-gateway", "serve-http", "--config", "/app/config.yaml"]

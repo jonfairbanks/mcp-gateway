@@ -12,11 +12,11 @@ from .server_http import HttpServer
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="gateway")
+    parser = argparse.ArgumentParser(prog="mcp-gateway")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    http_parser = subparsers.add_parser("serve-http")
-    http_parser.add_argument("--config", required=True)
+    serve_parser = subparsers.add_parser("serve")
+    serve_parser.add_argument("--config", required=True)
 
     return parser
 
@@ -48,7 +48,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        if args.command == "serve-http":
+        if args.command == "serve":
             asyncio.run(_run_http(args.config))
         else:
             raise SystemExit(f"Unknown command: {args.command}")

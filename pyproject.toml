@@ -23,6 +23,7 @@ dev = [
 
 [project.scripts]
 gateway = "mcp_gateway.cli:main"
+mcp-gateway = "mcp_gateway.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
