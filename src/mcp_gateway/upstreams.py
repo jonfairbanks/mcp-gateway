@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import os
 import time
@@ -23,11 +24,13 @@ class HTTPUpstream:
         timeout_ms: int,
         headers: Optional[Dict[str, str]] = None,
         bearer_token_env_var: Optional[str] = None,
+        serialize_requests: bool = False,
     ) -> None:
         self._endpoint = endpoint
         self._timeout = timeout_ms / 1000
         self._headers = headers or {}
         self._bearer_token_env_var = bearer_token_env_var
+        self._serialize_requests = serialize_requests
         self._session_id: Optional[str] = None
         self._protocol_version = "2024-11-05"
         self._session: Optional[aiohttp.ClientSession] = None
@@ -64,6 +67,14 @@ class HTTPUpstream:
         if protocol_version:
             self._protocol_version = protocol_version
 
+    @asynccontextmanager
+    async def _request_guard(self):
+        if self._serialize_requests:
+            async with self._lock:
+                yield
+            return
+        yield
+
     async def call(self, payload: Dict[str, Any]) -> UpstreamResponse:
         if not self._session:
             await self.start()
@@ -74,7 +85,7 @@ class HTTPUpstream:
                 self._protocol_version = protocol_version
 
         assert self._session
-        async with self._lock:
+        async with self._request_guard():
             async with self._session.post(self._endpoint, json=payload, headers=await self._request_headers()) as resp:
                 self._capture_session_headers(resp)
                 if resp.status == 202:
@@ -122,7 +133,7 @@ class HTTPUpstream:
         if not self._session:
             await self.start()
         assert self._session
-        async with self._lock:
+        async with self._request_guard():
             async with self._session.post(self._endpoint, json=payload, headers=await self._request_headers()) as resp:
                 self._capture_session_headers(resp)
                 if resp.status >= 400:

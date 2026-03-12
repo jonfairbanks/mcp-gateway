@@ -56,6 +56,110 @@ class Gateway:
         for client in self._stdio_upstreams.values():
             await client.close()
 
+    async def _safe_log_request(
+        self,
+        request_id: UUID,
+        method: str,
+        params: Optional[Dict[str, Any]],
+        raw_request: Dict[str, Any],
+        upstream_id: Optional[str],
+        tool_name: Optional[str],
+        client_id: Optional[str],
+        cache_key: Optional[str],
+    ) -> None:
+        try:
+            await self._store.log_request(
+                request_id=request_id,
+                method=method,
+                params=params,
+                raw_request=raw_request,
+                upstream_id=upstream_id,
+                tool_name=tool_name,
+                client_id=client_id,
+                cache_key=cache_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warn(
+                "store_operation_failed",
+                operation="log_request",
+                request_id=str(request_id),
+                method=method,
+                upstream_id=upstream_id,
+                tool_name=tool_name,
+                error=str(exc),
+            )
+
+    async def _safe_log_response(
+        self,
+        response_id: UUID,
+        request_id: UUID,
+        success: bool,
+        latency_ms: int,
+        cache_hit: bool,
+        response: Dict[str, Any],
+    ) -> None:
+        try:
+            await self._store.log_response(
+                response_id=response_id,
+                request_id=request_id,
+                success=success,
+                latency_ms=latency_ms,
+                cache_hit=cache_hit,
+                response=response,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warn(
+                "store_operation_failed",
+                operation="log_response",
+                request_id=str(request_id),
+                error=str(exc),
+            )
+
+    async def _safe_log_denial(
+        self,
+        denial_id: UUID,
+        request_id: UUID,
+        upstream_id: Optional[str],
+        tool_name: Optional[str],
+        reason: str,
+    ) -> None:
+        try:
+            await self._store.log_denial(denial_id, request_id, upstream_id, tool_name, reason)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warn(
+                "store_operation_failed",
+                operation="log_denial",
+                request_id=str(request_id),
+                upstream_id=upstream_id,
+                tool_name=tool_name,
+                error=str(exc),
+            )
+
+    async def _safe_cache_get(self, cache_key: str, request_id: UUID) -> Optional[Dict[str, Any]]:
+        try:
+            return await self._store.cache_get(cache_key)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warn(
+                "store_operation_failed",
+                operation="cache_get",
+                request_id=str(request_id),
+                cache_key=cache_key,
+                error=str(exc),
+            )
+            return None
+
+    async def _safe_cache_set(self, cache_key: str, response: Dict[str, Any], ttl_seconds: int, request_id: UUID) -> None:
+        try:
+            await self._store.cache_set(cache_key, response, ttl_seconds)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warn(
+                "store_operation_failed",
+                operation="cache_set",
+                request_id=str(request_id),
+                cache_key=cache_key,
+                error=str(exc),
+            )
+
     async def _record_health(self, upstream_id: str, method: str, success: bool) -> None:
         async with self._breaker_lock:
             upstream_cfg = self._upstream_by_id.get(upstream_id)
@@ -244,7 +348,6 @@ class Gateway:
                 {
                     "id": upstream.id,
                     "name": upstream.name,
-                    "transport": upstream.transport,
                     "tool_count": len(discovered),
                     "tools": discovered,
                     "exposed_tool_count": len(exposed),
@@ -253,8 +356,8 @@ class Gateway:
                 }
             )
         return {
-            "upstreams": upstreams_payload,
             "exposed_tool_registry_size": registry_size,
+            "upstreams": upstreams_payload,
         }
 
     def _is_global_breaker_open(self) -> bool:
@@ -414,6 +517,7 @@ class Gateway:
                     upstream.timeout_ms,
                     headers=upstream.http_headers,
                     bearer_token_env_var=upstream.bearer_token_env_var,
+                    serialize_requests=upstream.http_serialize_requests,
                 )
                 self._http_upstreams[upstream.id] = client
             return client
@@ -601,7 +705,7 @@ class Gateway:
             )
         self._telemetry.record_request(method)
         if method == "initialize":
-            await self._store.log_request(
+            await self._safe_log_request(
                 request_id=request_id,
                 method=method,
                 params=params,
@@ -624,7 +728,7 @@ class Gateway:
             timer = Timer()
             response_payload, success = await self._fanout_initialize(payload)
             latency_ms = timer.elapsed_ms()
-            await self._store.log_response(
+            await self._safe_log_response(
                 response_id=uuid4(),
                 request_id=request_id,
                 success=success,
@@ -662,7 +766,7 @@ class Gateway:
             )
 
         if method == "notifications/initialized" and payload.get("id") is None:
-            await self._store.log_request(
+            await self._safe_log_request(
                 request_id=request_id,
                 method=method,
                 params=params,
@@ -686,7 +790,7 @@ class Gateway:
             success = await self._fanout_initialized_notification(payload)
             latency_ms = timer.elapsed_ms()
             response_payload = {"accepted": success}
-            await self._store.log_response(
+            await self._safe_log_response(
                 response_id=uuid4(),
                 request_id=request_id,
                 success=success,
@@ -772,7 +876,7 @@ class Gateway:
         if self._is_cacheable(method, tool_name):
             cache_key = self._cache_key(upstream, method, tool_name or "", params, client_id)
 
-        await self._store.log_request(
+        await self._safe_log_request(
             request_id=request_id,
             method=method or "",
             params=params,
@@ -798,7 +902,7 @@ class Gateway:
             timer = Timer()
             response_payload, success, upstream_errors = await self._aggregate_list(payload, method)
             latency_ms = timer.elapsed_ms()
-            await self._store.log_response(
+            await self._safe_log_response(
                 response_id=uuid4(),
                 request_id=request_id,
                 success=success,
@@ -852,7 +956,7 @@ class Gateway:
                 },
             )
             denial_id = uuid4()
-            await self._store.log_denial(denial_id, request_id, upstream.id, tool_name, denial_reason)
+            await self._safe_log_denial(denial_id, request_id, upstream.id, tool_name, denial_reason)
             self._logger.info(
                 "mcp_denied",
                 request_id=str(request_id),
@@ -901,7 +1005,7 @@ class Gateway:
 
             latency_ms = timer.elapsed_ms()
             response_payload: Dict[str, Any] = {"accepted": success}
-            await self._store.log_response(
+            await self._safe_log_response(
                 response_id=uuid4(),
                 request_id=request_id,
                 success=success,
@@ -944,11 +1048,11 @@ class Gateway:
         if cache_key:
             cached = await self._memory_cache.get(cache_key)
             if cached is None:
-                cached = await self._store.cache_get(cache_key)
+                cached = await self._safe_cache_get(cache_key, request_id)
             if cached is not None:
                 cache_hit = True
                 response_payload = cached
-                await self._store.log_response(
+                await self._safe_log_response(
                     response_id=uuid4(),
                     request_id=request_id,
                     success=True,
@@ -1010,7 +1114,7 @@ class Gateway:
             success = False
 
         latency_ms = timer.elapsed_ms()
-        await self._store.log_response(
+        await self._safe_log_response(
             response_id=uuid4(),
             request_id=request_id,
             success=success,
@@ -1044,7 +1148,7 @@ class Gateway:
             ttl_minutes = upstream.cache_ttl_minutes or self._config.cache.default_ttl_minutes
             ttl_seconds = max(1, int(ttl_minutes)) * 60
             await self._memory_cache.set(cache_key, response.payload, ttl_seconds)
-            await self._store.cache_set(cache_key, response.payload, ttl_seconds)
+            await self._safe_cache_set(cache_key, response.payload, ttl_seconds, request_id)
 
         return GatewayResult(
             payload=response.payload,

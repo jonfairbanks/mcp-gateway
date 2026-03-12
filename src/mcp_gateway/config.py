@@ -39,6 +39,7 @@ class UpstreamConfig:
     endpoint: Optional[str]
     http_headers: Dict[str, str]
     bearer_token_env_var: Optional[str]
+    http_serialize_requests: bool
     command: Optional[List[str]]
     env: Dict[str, str]
     cwd: Optional[str]
@@ -129,6 +130,7 @@ def load_config(path: str) -> AppConfig:
                 endpoint=item.get("endpoint"),
                 http_headers=item.get("http_headers", {}) or {},
                 bearer_token_env_var=item.get("bearer_token_env_var"),
+                http_serialize_requests=bool(item.get("http_serialize_requests", False)),
                 command=_normalize_stdio_command(item),
                 env=item.get("env", {}) or {},
                 cwd=item.get("cwd"),

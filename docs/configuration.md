@@ -17,6 +17,7 @@ upstreams:
 - `listen_port` default `8080`
 - `api_key` bearer token required by gateway HTTP endpoints
 - `trusted_proxies` default `["127.0.0.1", "::1"]`
+  - `X-Forwarded-For` and `X-Client-Id` headers are only trusted when `request.remote` is in this list.
 - `request_max_bytes` default `2097152` (2 MB)
 - `rate_limit_per_minute` default `120`
 - `circuit_breaker_fail_threshold` default `20`
@@ -66,6 +67,7 @@ Common:
 - `endpoint` JSON-RPC HTTP endpoint
 - `http_headers` optional static headers
 - `bearer_token_env_var` optional env var name used if `Authorization` is not provided in `http_headers`
+- `http_serialize_requests` default `false` (concurrent HTTP calls enabled). Set `true` to force one-at-a-time requests for that upstream.
 
 ## Example
 
@@ -97,6 +99,7 @@ upstreams:
     name: "notion-sse"
     transport: "http_sse"
     endpoint: "https://mcp.notion.com/mcp"
+    http_serialize_requests: false
     http_headers:
       Notion-Version: "2022-06-28"
     bearer_token_env_var: "NOTION_TOKEN"

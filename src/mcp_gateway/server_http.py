@@ -31,6 +31,10 @@ class HttpServer:
         self._sessions: Dict[str, SseSession] = {}
         self._rate_limit_state: Dict[str, tuple[float, int]] = {}
         self._rate_limit_lock = asyncio.Lock()
+        self._rate_limit_gc_interval_seconds = 60.0
+        self._rate_limit_entry_ttl_seconds = 300.0
+        self._rate_limit_max_clients = 10000
+        self._next_rate_limit_gc_at = 0.0
 
     def _authorize(self, request: web.Request) -> Optional[web.Response]:
         api_key = self._config.gateway.api_key
@@ -49,20 +53,37 @@ class HttpServer:
         return remote in trusted
 
     def _client_id(self, request: web.Request) -> str:
+        trusted_proxy = self._trusted_proxy(request)
         explicit = request.headers.get("X-Client-Id")
-        if explicit:
+        if explicit and trusted_proxy:
             return explicit
-        if self._trusted_proxy(request):
+        if trusted_proxy:
             forwarded_for = request.headers.get("X-Forwarded-For", "")
             if forwarded_for:
                 return forwarded_for.split(",")[0].strip()
         return request.remote or "unknown"
+
+    def _prune_rate_limit_state(self, now: float) -> None:
+        if now < self._next_rate_limit_gc_at and len(self._rate_limit_state) <= self._rate_limit_max_clients:
+            return
+        cutoff = now - self._rate_limit_entry_ttl_seconds
+        stale_clients = [client_id for client_id, (window_start, _) in self._rate_limit_state.items() if window_start < cutoff]
+        for client_id in stale_clients:
+            self._rate_limit_state.pop(client_id, None)
+        if len(self._rate_limit_state) > self._rate_limit_max_clients:
+            # If still over limit, evict the oldest windows first.
+            overflow = len(self._rate_limit_state) - self._rate_limit_max_clients
+            oldest = sorted(self._rate_limit_state.items(), key=lambda item: item[1][0])[:overflow]
+            for client_id, _ in oldest:
+                self._rate_limit_state.pop(client_id, None)
+        self._next_rate_limit_gc_at = now + self._rate_limit_gc_interval_seconds
 
     async def _rate_limit(self, request: web.Request) -> Optional[web.Response]:
         limit = max(1, self._config.gateway.rate_limit_per_minute)
         now = time.monotonic()
         client_id = self._client_id(request)
         async with self._rate_limit_lock:
+            self._prune_rate_limit_state(now)
             window_start, count = self._rate_limit_state.get(client_id, (now, 0))
             if now - window_start >= 60:
                 window_start = now

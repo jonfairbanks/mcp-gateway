@@ -1,4 +1,7 @@
 /src/mcp_gateway/__pycache__
+__pycache__/
+.venv/
+venv/
 *.egg-info/
 dist/
 build/
