@@ -9,6 +9,7 @@ from .gateway import Gateway
 from .logging import Logger
 from .postgres import PostgresStore
 from .server_http import HttpServer
+from .telemetry import GatewayTelemetry
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,13 +34,15 @@ async def _run_http(config_path: str) -> None:
         )
     store = PostgresStore(dsn)
     await store.start()
-    gateway = Gateway(config, store, logger)
+    telemetry = GatewayTelemetry()
+    gateway = Gateway(config, store, logger, telemetry)
     try:
         await gateway.warmup()
-        server = HttpServer(config, gateway, logger)
+        server = HttpServer(config, gateway, logger, telemetry)
         await server.run()
     finally:
         await gateway.close()
+        await telemetry.close()
         await store.close()
 
 

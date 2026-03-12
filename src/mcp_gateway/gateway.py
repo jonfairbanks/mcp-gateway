@@ -13,6 +13,7 @@ from .jsonrpc import make_error_response, normalize_params
 from .logging import Logger, Timer
 from .postgres import PostgresStore
 from .router import build_routes, select_upstream
+from .telemetry import GatewayTelemetry
 from .upstreams import HTTPUpstream, StdioUpstream, UpstreamResponse
 
 
@@ -27,10 +28,11 @@ class GatewayResult:
 
 
 class Gateway:
-    def __init__(self, config: AppConfig, store: PostgresStore, logger: Logger) -> None:
+    def __init__(self, config: AppConfig, store: PostgresStore, logger: Logger, telemetry: GatewayTelemetry) -> None:
         self._config = config
         self._store = store
         self._logger = logger
+        self._telemetry = telemetry
         self._routes = build_routes(config.upstreams)
         self._memory_cache = TTLCache(config.cache.max_entries)
         self._http_upstreams: Dict[str, HTTPUpstream] = {}
@@ -38,6 +40,7 @@ class Gateway:
         self._upstream_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._tool_registry: Dict[str, str] = {}
         self._tool_alias_registry: Dict[str, str] = {}
+        self._upstream_tools: Dict[str, list[str]] = {u.id: [] for u in config.upstreams}
         self._registry_lock = asyncio.Lock()
         self._upstream_by_id: Dict[str, UpstreamConfig] = {u.id: u for u in config.upstreams}
         self._health_counters: Dict[str, Dict[str, Dict[str, int]]] = {}
@@ -93,6 +96,7 @@ class Gateway:
             fail_count=fail_count,
             last_outcome="success" if success else "fail",
         )
+        self._telemetry.record_upstream_outcome(upstream_id, method, success)
 
     def _get_tool_name(self, method: str, params: Optional[Dict[str, Any]]) -> Optional[str]:
         if method != "tools/call" or not params:
@@ -228,6 +232,31 @@ class Gateway:
     def is_ready(self) -> bool:
         return any(status.get("initialize_success") for status in self._warmup_status.values())
 
+    async def tools_catalog(self) -> Dict[str, Any]:
+        async with self._registry_lock:
+            upstream_tools = {k: list(v) for k, v in self._upstream_tools.items()}
+            registry_size = len(self._tool_registry)
+        upstreams_payload = []
+        for upstream in self._config.upstreams:
+            discovered = upstream_tools.get(upstream.id, [])
+            exposed = [tool for tool in discovered if tool not in upstream.deny_tools]
+            upstreams_payload.append(
+                {
+                    "id": upstream.id,
+                    "name": upstream.name,
+                    "transport": upstream.transport,
+                    "tool_count": len(discovered),
+                    "tools": discovered,
+                    "exposed_tool_count": len(exposed),
+                    "exposed_tools": exposed,
+                    "deny_tools": list(upstream.deny_tools),
+                }
+            )
+        return {
+            "upstreams": upstreams_payload,
+            "exposed_tool_registry_size": registry_size,
+        }
+
     def _is_global_breaker_open(self) -> bool:
         return time.monotonic() < float(self._global_breaker.get("open_until", 0.0))
 
@@ -314,21 +343,29 @@ class Gateway:
             seen: set[str] = set()
             tools: list[Dict[str, Any]] = []
             registry: Dict[str, str] = {}
+            upstream_tools: Dict[str, list[str]] = {}
             for item in results:
                 upstream = item["upstream"]
+                upstream_tool_names: list[str] = []
                 for tool in item["result"].get("tools", []) or []:
                     name = tool.get("name")
-                    if not name or name in seen:
+                    if not name:
+                        continue
+                    if name not in upstream_tool_names:
+                        upstream_tool_names.append(name)
+                    if name in seen:
                         continue
                     if name in upstream.deny_tools:
                         continue
                     seen.add(name)
                     tools.append(tool)
                     registry[name] = upstream.id
+                upstream_tools[upstream.id] = upstream_tool_names
             merged["tools"] = tools
             async with self._registry_lock:
                 self._tool_registry = registry
                 self._tool_alias_registry = self._build_tool_alias_registry(registry)
+                self._upstream_tools.update(upstream_tools)
         elif method == "resources/list":
             seen = set()
             resources: list[Dict[str, Any]] = []
@@ -536,6 +573,8 @@ class Gateway:
             async with self._registry_lock:
                 self._tool_registry.update(registry_updates)
                 self._tool_alias_registry = self._build_tool_alias_registry(self._tool_registry)
+                for upstream_id, status in self._warmup_status.items():
+                    self._upstream_tools[upstream_id] = list(status.get("tools", []))
 
     async def handle(self, payload: Dict[str, Any], client_id: Optional[str]) -> GatewayResult:
         request_id = uuid4()
@@ -543,6 +582,14 @@ class Gateway:
         params = payload.get("params")
         if not isinstance(method, str):
             error_payload = make_error_response(payload.get("id"), -32600, "Invalid Request")
+            self._telemetry.record_response(
+                method="invalid",
+                success=False,
+                cache_hit=False,
+                latency_ms=0,
+                upstream_id=None,
+                tool_name=None,
+            )
             return GatewayResult(
                 payload=error_payload,
                 success=False,
@@ -551,6 +598,7 @@ class Gateway:
                 tool_name=None,
                 request_id=request_id,
             )
+        self._telemetry.record_request(method)
         if method == "initialize":
             await self._store.log_request(
                 request_id=request_id,
@@ -594,6 +642,14 @@ class Gateway:
                 latency_ms=latency_ms,
                 success=success,
                 error=response_payload.get("error"),
+            )
+            self._telemetry.record_response(
+                method=method,
+                success=success,
+                cache_hit=False,
+                latency_ms=latency_ms,
+                upstream_id="*",
+                tool_name=None,
             )
             return GatewayResult(
                 payload=response_payload,
@@ -648,6 +704,14 @@ class Gateway:
                 latency_ms=latency_ms,
                 success=success,
             )
+            self._telemetry.record_response(
+                method=method,
+                success=success,
+                cache_hit=False,
+                latency_ms=latency_ms,
+                upstream_id="*",
+                tool_name=None,
+            )
             return GatewayResult(
                 payload=response_payload,
                 success=success,
@@ -687,6 +751,14 @@ class Gateway:
 
         if not upstream:
             error_payload = make_error_response(payload.get("id"), -32000, "No upstream configured")
+            self._telemetry.record_response(
+                method=method,
+                success=False,
+                cache_hit=False,
+                latency_ms=0,
+                upstream_id=None,
+                tool_name=tool_name,
+            )
             return GatewayResult(
                 payload=error_payload,
                 success=False,
@@ -745,6 +817,14 @@ class Gateway:
                 upstream_error_count=len(upstream_errors),
                 upstream_errors=upstream_errors,
             )
+            self._telemetry.record_response(
+                method=method,
+                success=success,
+                cache_hit=False,
+                latency_ms=latency_ms,
+                upstream_id="*",
+                tool_name=None,
+            )
             return GatewayResult(
                 payload=response_payload,
                 success=success,
@@ -766,6 +846,15 @@ class Gateway:
                 tool_name=tool_name,
                 tool_alias=self._tool_alias(upstream.id, tool_name),
                 reason=denial_reason,
+            )
+            self._telemetry.record_denial(upstream.id, tool_name)
+            self._telemetry.record_response(
+                method=method,
+                success=False,
+                cache_hit=False,
+                latency_ms=0,
+                upstream_id=upstream.id,
+                tool_name=tool_name,
             )
             return GatewayResult(
                 payload=denial_payload,
@@ -818,6 +907,14 @@ class Gateway:
                 success=success,
                 error=error,
             )
+            self._telemetry.record_response(
+                method=method,
+                success=success,
+                cache_hit=False,
+                latency_ms=latency_ms,
+                upstream_id=upstream.id,
+                tool_name=tool_name,
+            )
             return GatewayResult(
                 payload=response_payload,
                 success=success,
@@ -854,6 +951,14 @@ class Gateway:
                     tool_alias=self._tool_alias(upstream.id, tool_name),
                     cache_hit=True,
                     latency_ms=timer.elapsed_ms(),
+                )
+                self._telemetry.record_response(
+                    method=method,
+                    success=True,
+                    cache_hit=True,
+                    latency_ms=timer.elapsed_ms(),
+                    upstream_id=upstream.id,
+                    tool_name=tool_name,
                 )
                 return GatewayResult(
                     payload=response_payload,
@@ -911,6 +1016,14 @@ class Gateway:
             latency_ms=latency_ms,
             success=success,
             error=response.payload.get("error"),
+        )
+        self._telemetry.record_response(
+            method=method,
+            success=success,
+            cache_hit=cache_hit,
+            latency_ms=latency_ms,
+            upstream_id=upstream.id,
+            tool_name=tool_name,
         )
 
         if cache_key and success:

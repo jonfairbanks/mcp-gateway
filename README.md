@@ -141,6 +141,8 @@ Per upstream:
 ## HTTP Endpoints
 
 - `POST /mcp`: JSON-RPC request/response.
+- `GET /tools`: gateway view of upstream tool catalogs (`tools`, `exposed_tools`, `deny_tools` per upstream).
+- `GET /metrics`: Prometheus/OpenMetrics text endpoint for scraping.
 - `GET /sse`: open SSE stream session.
 - `POST /message?session_id=...`: send JSON-RPC and stream result via SSE.
 - `GET /healthz`: liveness plus warmup/breaker status.
@@ -154,6 +156,14 @@ Structured logs include:
 - `upstream_health` with per-method success/fail counters
 - `upstream_warmup` with discovered tools per upstream
 - `upstream_process_log` tagged with `upstream_id` and `stream` (currently `stderr`)
+
+Gateway metrics exposed at `/metrics`:
+
+- `mcp_gateway_requests_total`
+- `mcp_gateway_responses_total`
+- `mcp_gateway_response_latency_ms`
+- `mcp_gateway_denials_total`
+- `mcp_gateway_upstream_calls_total`
 
 Tool observability fields:
 

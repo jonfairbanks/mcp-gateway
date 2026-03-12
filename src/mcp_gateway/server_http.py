@@ -12,6 +12,7 @@ from .config import AppConfig
 from .gateway import Gateway
 from .jsonrpc import json_dumps, make_error_response
 from .logging import Logger
+from .telemetry import GatewayTelemetry
 
 
 class SseSession:
@@ -22,10 +23,11 @@ class SseSession:
 
 
 class HttpServer:
-    def __init__(self, config: AppConfig, gateway: Gateway, logger: Logger) -> None:
+    def __init__(self, config: AppConfig, gateway: Gateway, logger: Logger, telemetry: GatewayTelemetry) -> None:
         self._config = config
         self._gateway = gateway
         self._logger = logger
+        self._telemetry = telemetry
         self._sessions: Dict[str, SseSession] = {}
         self._rate_limit_state: Dict[str, tuple[float, int]] = {}
         self._rate_limit_lock = asyncio.Lock()
@@ -83,6 +85,20 @@ class HttpServer:
         ready = self._gateway.is_ready()
         status = 200 if ready else 503
         return web.json_response({"ready": ready, **self._gateway.status_snapshot()}, status=status)
+
+    async def tools_handler(self, request: web.Request) -> web.Response:
+        unauthorized = self._authorize(request)
+        if unauthorized:
+            return unauthorized
+        rate_limited = await self._rate_limit(request)
+        if rate_limited:
+            return rate_limited
+        payload = await self._gateway.tools_catalog()
+        return web.json_response(payload)
+
+    async def metrics_handler(self, request: web.Request) -> web.Response:
+        body = self._telemetry.render_prometheus()
+        return web.Response(body=body, headers={"Content-Type": self._telemetry.prometheus_content_type})
 
     async def sse_handler(self, request: web.Request) -> web.StreamResponse:
         unauthorized = self._authorize(request)
@@ -172,6 +188,8 @@ class HttpServer:
             [
                 web.get("/healthz", self.health_handler),
                 web.get("/readyz", self.ready_handler),
+                web.get("/tools", self.tools_handler),
+                web.get("/metrics", self.metrics_handler),
                 web.get("/sse", self.sse_handler),
                 web.post("/message", self.message_handler),
                 web.post("/mcp", self.rpc_handler),
