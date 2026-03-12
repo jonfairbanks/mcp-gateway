@@ -38,6 +38,7 @@ class UpstreamConfig:
     transport: str
     endpoint: Optional[str]
     http_headers: Dict[str, str]
+    bearer_token_env_var: Optional[str]
     command: Optional[List[str]]
     env: Dict[str, str]
     cwd: Optional[str]
@@ -127,6 +128,7 @@ def load_config(path: str) -> AppConfig:
                 transport=item["transport"],
                 endpoint=item.get("endpoint"),
                 http_headers=item.get("http_headers", {}) or {},
+                bearer_token_env_var=item.get("bearer_token_env_var"),
                 command=_normalize_stdio_command(item),
                 env=item.get("env", {}) or {},
                 cwd=item.get("cwd"),

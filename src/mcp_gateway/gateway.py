@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
@@ -369,7 +370,12 @@ class Gateway:
             if not client:
                 if not upstream.endpoint:
                     raise RuntimeError(f"Upstream '{upstream.id}' missing endpoint")
-                client = HTTPUpstream(upstream.endpoint, upstream.timeout_ms, headers=upstream.http_headers)
+                client = HTTPUpstream(
+                    upstream.endpoint,
+                    upstream.timeout_ms,
+                    headers=upstream.http_headers,
+                    bearer_token_env_var=upstream.bearer_token_env_var,
+                )
                 self._http_upstreams[upstream.id] = client
             return client
         if upstream.transport == "stdio":

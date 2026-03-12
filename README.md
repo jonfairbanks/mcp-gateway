@@ -129,6 +129,7 @@ Per upstream:
 - `command` for `stdio` upstreams (string or list) plus optional `args`, `env`, `cwd`.
 - `endpoint` for `http_sse` upstreams (JSON-RPC POST endpoint).
 - `http_headers`: optional static headers sent to HTTP upstream requests.
+- `bearer_token_env_var`: env var name for bearer token (applied when `Authorization` is not in `http_headers`).
 - `timeout_ms`
 - `stdio_read_limit_bytes`: max bytes for one upstream stdout line (default `104857600` / 100 MB).
 - `max_in_flight`: concurrency cap per upstream.

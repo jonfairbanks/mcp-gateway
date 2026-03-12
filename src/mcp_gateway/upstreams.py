@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
@@ -15,10 +17,17 @@ class UpstreamResponse:
 
 
 class HTTPUpstream:
-    def __init__(self, endpoint: str, timeout_ms: int, headers: Optional[Dict[str, str]] = None) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        timeout_ms: int,
+        headers: Optional[Dict[str, str]] = None,
+        bearer_token_env_var: Optional[str] = None,
+    ) -> None:
         self._endpoint = endpoint
         self._timeout = timeout_ms / 1000
         self._headers = headers or {}
+        self._bearer_token_env_var = bearer_token_env_var
         self._session_id: Optional[str] = None
         self._protocol_version = "2024-11-05"
         self._session: Optional[aiohttp.ClientSession] = None
@@ -40,6 +49,11 @@ class HTTPUpstream:
         headers.setdefault("MCP-Protocol-Version", self._protocol_version)
         if self._session_id:
             headers["MCP-Session-ID"] = self._session_id
+        if "Authorization" not in headers:
+            if self._bearer_token_env_var:
+                token = os.getenv(self._bearer_token_env_var, "")
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
         return headers
 
     def _capture_session_headers(self, resp: aiohttp.ClientResponse) -> None:
