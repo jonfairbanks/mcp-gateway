@@ -20,6 +20,8 @@ This project is built for multi-client deployments (for example, Codex/Claude us
 
 Client -> MCP Gateway (HTTP) -> Upstream MCP servers
 
+![MCP Gateway Architecture](docs/mcp-gateway-architecture.png)
+
 Gateway behavior:
 
 - `initialize`: fan-out to all upstreams and merge capabilities.
