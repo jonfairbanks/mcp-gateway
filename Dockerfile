@@ -13,4 +13,4 @@ COPY config.yaml schema.sql /app/
 
 EXPOSE 8080
 
-CMD ["mcp-gateway", "serve-http", "--config", "/app/config.yaml"]
+CMD ["mcp-gateway", "serve", "--config", "/app/config.yaml"]
