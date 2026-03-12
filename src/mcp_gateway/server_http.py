@@ -174,7 +174,7 @@ class HttpServer:
                 web.get("/readyz", self.ready_handler),
                 web.get("/sse", self.sse_handler),
                 web.post("/message", self.message_handler),
-                web.post("/rpc", self.rpc_handler),
+                web.post("/mcp", self.rpc_handler),
             ]
         )
         return app
@@ -193,5 +193,8 @@ class HttpServer:
         try:
             while True:
                 await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            # Normal shutdown path when asyncio.run() cancels outstanding tasks.
+            pass
         finally:
             await runner.cleanup()

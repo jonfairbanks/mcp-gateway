@@ -93,7 +93,7 @@ Codex example:
 
 ```toml
 [mcp_servers.mcp-gateway]
-url = "http://localhost:8080/rpc"
+url = "http://localhost:8080/mcp"
 http_headers = { "Authorization" = "Bearer change-me" }
 ```
 
@@ -140,7 +140,7 @@ Per upstream:
 
 ## HTTP Endpoints
 
-- `POST /rpc`: JSON-RPC request/response.
+- `POST /mcp`: JSON-RPC request/response.
 - `GET /sse`: open SSE stream session.
 - `POST /message?session_id=...`: send JSON-RPC and stream result via SSE.
 - `GET /healthz`: liveness plus warmup/breaker status.
@@ -188,7 +188,7 @@ Expected outcome in that case:
 
 If tools do not appear in client:
 
-1. Confirm client points to gateway URL (`/rpc`) and sends `Authorization: Bearer <api_key>`.
+1. Confirm client points to gateway URL (`/mcp`) and sends `Authorization: Bearer <api_key>`.
 2. Check warmup logs for each upstream (`event=upstream_warmup`).
 3. Check discovery logs (`method=tools/list`) and ensure aggregate success.
 4. Review `upstream_stderr` logs for auth/permission errors.
