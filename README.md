@@ -180,6 +180,7 @@ Database tables in [`schema.sql`](schema.sql):
 ## Policy and Safety
 
 - Denylists are enforced before upstream invocation.
+- Denied tool calls return JSON-RPC `-32001` with structured `error.data` (`category=policy_denied`, `upstream_id`, `tool_name`, `retryable=false`).
 - Cache only applies to `tools/call` successes.
 - Notifications are handled as non-blocking upstream notifications.
 - Circuit breakers protect the gateway from repeated upstream failures.

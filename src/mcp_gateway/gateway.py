@@ -837,7 +837,20 @@ class Gateway:
 
         denial_reason = self._deny(upstream, tool_name)
         if denial_reason:
-            denial_payload = make_error_response(payload.get("id"), -32001, denial_reason)
+            denial_payload = make_error_response(
+                payload.get("id"),
+                -32001,
+                "Blocked by gateway policy: tool not allowed",
+                data={
+                    "category": "policy_denied",
+                    "enforcer": "mcp-gateway",
+                    "upstream_id": upstream.id,
+                    "tool_name": tool_name,
+                    "policy_type": "deny_tools",
+                    "retryable": False,
+                    "suggestion": "Use an allowed tool or contact gateway admin to update deny_tools policy.",
+                },
+            )
             denial_id = uuid4()
             await self._store.log_denial(denial_id, request_id, upstream.id, tool_name, denial_reason)
             self._logger.info(
