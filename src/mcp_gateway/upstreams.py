@@ -142,12 +142,16 @@ class StdioUpstream:
     async def start(self) -> None:
         if self._process:
             return
+        merged_env = None
+        if self._env:
+            # Merge custom env vars over process env so PATH and runtime defaults are preserved.
+            merged_env = {**os.environ, **self._env}
         self._process = await asyncio.create_subprocess_exec(
             *self._command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=self._env or None,
+            env=merged_env,
             cwd=self._cwd,
             limit=self._read_limit_bytes,
         )
