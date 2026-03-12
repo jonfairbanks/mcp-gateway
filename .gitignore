@@ -1,1 +1,6 @@
 /src/mcp_gateway/__pycache__
+*.egg-info/
+dist/
+build/
+*.egg
+pip-wheel-metadata/
