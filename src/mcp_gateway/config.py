@@ -127,7 +127,6 @@ def load_config(path: str) -> AppConfig:
                 transport=item["transport"],
                 endpoint=item.get("endpoint"),
                 http_headers=item.get("http_headers", {}) or {},
-                command=item.get("command"),
                 command=_normalize_stdio_command(item),
                 env=item.get("env", {}) or {},
                 cwd=item.get("cwd"),
