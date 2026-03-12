@@ -126,7 +126,7 @@ Per upstream:
 
 - `id`, `name`
 - `transport`: `stdio` or `http_sse`.
-- `command` + optional `env`, `cwd` for `stdio` upstreams.
+- `command` for `stdio` upstreams (string or list) plus optional `args`, `env`, `cwd`.
 - `endpoint` for `http_sse` upstreams (JSON-RPC POST endpoint).
 - `http_headers`: optional static headers sent to HTTP upstream requests.
 - `timeout_ms`
