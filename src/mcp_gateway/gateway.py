@@ -627,6 +627,28 @@ class Gateway:
         async with semaphore:
             await client.notify(payload)
 
+    def _log_upstream_exception(
+        self,
+        upstream_id: str,
+        method: str,
+        code: int,
+        client_message: str,
+        exc: BaseException,
+        *,
+        notification: bool,
+    ) -> None:
+        detail = str(exc) or type(exc).__name__
+        self._logger.error(
+            "upstream_request_failed",
+            upstream_id=upstream_id,
+            method=method,
+            notification=notification,
+            code=code,
+            client_message=client_message,
+            error_type=type(exc).__name__,
+            error=detail,
+        )
+
     async def _execute_upstream_operation(
         self,
         upstream: UpstreamConfig,
@@ -649,12 +671,36 @@ class Gateway:
                 log_payload=response.payload,
                 error=error if isinstance(error, dict) else None,
             )
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             error = {"code": -32002, "message": "Upstream timeout"}
+            self._log_upstream_exception(
+                upstream.id,
+                method,
+                error["code"],
+                error["message"],
+                exc,
+                notification=notification,
+            )
         except RuntimeError as exc:
-            error = {"code": -32004, "message": str(exc)}
+            error = {"code": -32004, "message": "Upstream unavailable"}
+            self._log_upstream_exception(
+                upstream.id,
+                method,
+                error["code"],
+                error["message"],
+                exc,
+                notification=notification,
+            )
         except Exception as exc:  # noqa: BLE001
-            error = {"code": -32003, "message": f"Upstream error: {exc}"}
+            error = {"code": -32003, "message": "Upstream request failed"}
+            self._log_upstream_exception(
+                upstream.id,
+                method,
+                error["code"],
+                error["message"],
+                exc,
+                notification=notification,
+            )
 
         if notification:
             return UpstreamExecution(

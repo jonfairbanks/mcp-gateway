@@ -314,7 +314,8 @@ def test_execute_upstream_operation_returns_successful_request_payload() -> None
 
 def test_execute_upstream_operation_maps_notification_failures() -> None:
     config = _config_with_upstreams([_upstream()])
-    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    logger = RecordingLogger()
+    gateway = Gateway(config, PostgresStore(""), logger, GatewayTelemetry())
     upstream = config.upstreams[0]
 
     async def fake_notify(upstream_cfg, payload) -> None:
@@ -336,7 +337,64 @@ def test_execute_upstream_operation_maps_notification_failures() -> None:
     assert execution.success is False
     assert execution.payload == {"accepted": False}
     assert execution.log_payload["accepted"] is False
-    assert execution.error == {"code": -32004, "message": "broken upstream"}
+    assert execution.log_payload["error"] == {"code": -32004, "message": "Upstream unavailable"}
+    assert execution.error == {"code": -32004, "message": "Upstream unavailable"}
+    assert logger.errors == [
+        (
+            "upstream_request_failed",
+            {
+                "upstream_id": upstream.id,
+                "method": "notifications/test",
+                "notification": True,
+                "code": -32004,
+                "client_message": "Upstream unavailable",
+                "error_type": "RuntimeError",
+                "error": "broken upstream",
+            },
+        )
+    ]
+
+
+def test_execute_upstream_operation_returns_generic_error_payload_for_unexpected_exceptions() -> None:
+    config = _config_with_upstreams([_upstream()])
+    logger = RecordingLogger()
+    gateway = Gateway(config, PostgresStore(""), logger, GatewayTelemetry())
+    upstream = config.upstreams[0]
+
+    async def fake_call(upstream_cfg, payload):
+        assert upstream_cfg.id == upstream.id
+        assert payload["method"] == "tools/call"
+        raise Exception("secret token leaked")
+
+    gateway._call_upstream = fake_call  # type: ignore[method-assign]
+
+    execution = asyncio.run(
+        gateway._execute_upstream_operation(
+            upstream,
+            "tools/call",
+            {"jsonrpc": "2.0", "id": "1", "method": "tools/call", "params": {}},
+        )
+    )
+
+    assert execution.success is False
+    assert execution.payload["error"] == {"code": -32003, "message": "Upstream request failed"}
+    assert execution.log_payload == execution.payload
+    assert execution.error == {"code": -32003, "message": "Upstream request failed"}
+    assert "secret token leaked" not in json.dumps(execution.payload)
+    assert logger.errors == [
+        (
+            "upstream_request_failed",
+            {
+                "upstream_id": upstream.id,
+                "method": "tools/call",
+                "notification": False,
+                "code": -32003,
+                "client_message": "Upstream request failed",
+                "error_type": "Exception",
+                "error": "secret token leaked",
+            },
+        )
+    ]
 
 
 def test_warmup_and_tools_list_build_identical_tool_registry_state() -> None:
