@@ -4,9 +4,9 @@
 
 It is designed for shared deployments with policy controls, caching, and observability.
 
-![MCP Gateway Architecture](docs/mcp-gateway-architecture.png)
+<img src="docs/mcp-gateway-architecture.png" alt="MCP Gateway Architecture" width="75%">
 
-![MCP Gateway Runtime Flow](docs/mcp-gateway-runtime-flow.png)
+<img src="docs/mcp-gateway-runtime-flow.png" alt="MCP Gateway Runtime Flow" width="75%">
 
 Discovery requests such as `initialize` and `tools/list` fan out across upstream MCPs and the gateway merges the results.
 `tools/call` requests route to one selected upstream, then the gateway applies caching, logging, and policy checks before returning the response.
