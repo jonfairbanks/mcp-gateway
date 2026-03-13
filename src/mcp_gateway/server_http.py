@@ -155,6 +155,36 @@ class HttpServer:
             await self._close_session(session_id)
             return False
 
+    async def _preflight_request(self, request: web.Request, endpoint: Optional[str] = None) -> Optional[web.Response]:
+        if endpoint:
+            unauthorized = self._authorize_http_endpoint(request, endpoint)
+        else:
+            unauthorized = self._authorize(request)
+        if unauthorized:
+            return unauthorized
+        return await self._rate_limit(request)
+
+    async def _parse_json_request(self, request: web.Request) -> tuple[Optional[Dict[str, Any]], Optional[web.Response]]:
+        try:
+            return await request.json(), None
+        except json.JSONDecodeError:
+            return None, web.json_response(make_error_response(None, -32700, "Invalid JSON"), status=400)
+
+    async def _dispatch_gateway_request(
+        self,
+        request: web.Request,
+        endpoint: Optional[str] = None,
+    ) -> tuple[Optional[Dict[str, Any]], Optional[web.Response], Optional[Any]]:
+        blocked = await self._preflight_request(request, endpoint=endpoint)
+        if blocked:
+            return None, blocked, None
+        payload, invalid_json = await self._parse_json_request(request)
+        if invalid_json:
+            return None, invalid_json, None
+        client_id = self._client_id(request)
+        result = await self._gateway.handle(payload, client_id)
+        return payload, None, result
+
     async def health_handler(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "service": "mcp-gateway", **self._gateway.status_snapshot()})
 
@@ -164,12 +194,9 @@ class HttpServer:
         return web.json_response({"ready": ready, **self._gateway.status_snapshot()}, status=status)
 
     async def tools_handler(self, request: web.Request) -> web.Response:
-        unauthorized = self._authorize_http_endpoint(request, "/tools")
-        if unauthorized:
-            return unauthorized
-        rate_limited = await self._rate_limit(request)
-        if rate_limited:
-            return rate_limited
+        blocked = await self._preflight_request(request, endpoint="/tools")
+        if blocked:
+            return blocked
         payload = await self._gateway.tools_catalog()
         return web.json_response(payload)
 
@@ -178,12 +205,9 @@ class HttpServer:
         return web.Response(body=body, headers={"Content-Type": self._telemetry.prometheus_content_type})
 
     async def sse_handler(self, request: web.Request) -> web.StreamResponse:
-        unauthorized = self._authorize(request)
-        if unauthorized:
-            return unauthorized
-        rate_limited = await self._rate_limit(request)
-        if rate_limited:
-            return rate_limited
+        blocked = await self._preflight_request(request)
+        if blocked:
+            return blocked
         if self._session_capacity_exceeded():
             return web.json_response(
                 make_error_response(
@@ -225,21 +249,12 @@ class HttpServer:
         return response
 
     async def message_handler(self, request: web.Request) -> web.Response:
-        unauthorized = self._authorize(request)
-        if unauthorized:
-            return unauthorized
-        rate_limited = await self._rate_limit(request)
-        if rate_limited:
-            return rate_limited
-
         session_id = request.query.get("session_id") or request.headers.get("MCP-Session-ID")
-        try:
-            payload = await request.json()
-        except json.JSONDecodeError:
-            return web.json_response(make_error_response(None, -32700, "Invalid JSON"), status=400)
-
-        client_id = self._client_id(request)
-        result = await self._gateway.handle(payload, client_id)
+        payload, blocked, result = await self._dispatch_gateway_request(request)
+        if blocked:
+            return blocked
+        assert payload is not None
+        assert result is not None
         if payload.get("id") is None:
             return web.Response(status=202)
         if session_id and session_id in self._sessions:
@@ -259,20 +274,11 @@ class HttpServer:
         return web.json_response(result.payload)
 
     async def rpc_handler(self, request: web.Request) -> web.Response:
-        unauthorized = self._authorize(request)
-        if unauthorized:
-            return unauthorized
-        rate_limited = await self._rate_limit(request)
-        if rate_limited:
-            return rate_limited
-
-        try:
-            payload = await request.json()
-        except json.JSONDecodeError:
-            return web.json_response(make_error_response(None, -32700, "Invalid JSON"), status=400)
-
-        client_id = self._client_id(request)
-        result = await self._gateway.handle(payload, client_id)
+        payload, blocked, result = await self._dispatch_gateway_request(request)
+        if blocked:
+            return blocked
+        assert payload is not None
+        assert result is not None
         if payload.get("id") is None:
             return web.Response(status=202)
         return web.json_response(result.payload)

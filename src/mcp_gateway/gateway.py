@@ -31,6 +31,9 @@ BUILTIN_REDACT_FIELDS = frozenset(
     }
 )
 
+DISCOVERY_METHODS = frozenset({"tools/list", "resources/list", "resources/templates/list", "prompts/list"})
+OPTIONAL_DISCOVERY_METHODS = frozenset({"resources/list", "resources/templates/list", "prompts/list"})
+
 
 @dataclass
 class GatewayResult:
@@ -40,6 +43,32 @@ class GatewayResult:
     upstream_id: Optional[str]
     tool_name: Optional[str]
     request_id: UUID
+
+
+@dataclass
+class ToolRegistryState:
+    tools: list[Dict[str, Any]]
+    registry: Dict[str, str]
+    upstream_tools: Dict[str, list[str]]
+    duplicates: Dict[str, set[str]]
+
+
+@dataclass
+class RoutedRequest:
+    payload: Dict[str, Any]
+    params: Optional[Dict[str, Any]]
+    requested_tool_name: Optional[str]
+    tool_name: Optional[str]
+    upstream: Optional[UpstreamConfig]
+    cache_key: Optional[str]
+
+
+@dataclass
+class UpstreamExecution:
+    success: bool
+    payload: Dict[str, Any]
+    log_payload: Dict[str, Any]
+    error: Optional[Dict[str, Any]]
 
 
 class Gateway:
@@ -101,6 +130,66 @@ class Gateway:
             for tool_name, upstream_ids in tool_sources.items()
             if len(upstream_ids) > 1
         }
+
+    def _build_tool_registry_state(
+        self,
+        tool_payloads: list[tuple[UpstreamConfig, list[Dict[str, Any]]]],
+    ) -> ToolRegistryState:
+        seen: set[str] = set()
+        merged_tools: list[Dict[str, Any]] = []
+        registry: Dict[str, str] = {}
+        tool_sources: Dict[str, set[str]] = {}
+        upstream_tools: Dict[str, list[str]] = {upstream.id: [] for upstream in self._config.upstreams}
+
+        for upstream, tools in tool_payloads:
+            upstream_tool_names: list[str] = []
+            for tool in tools:
+                name = tool.get("name")
+                if not isinstance(name, str) or not name:
+                    continue
+                if name not in upstream_tool_names:
+                    upstream_tool_names.append(name)
+                tool_sources.setdefault(name, set()).add(upstream.id)
+                # Keep denied tools in the registry so tools/call can be routed and
+                # rejected with an explicit policy-denied response.
+                registry[name] = upstream.id
+                if name in seen:
+                    continue
+                seen.add(name)
+                merged_tools.append(tool)
+            upstream_tools[upstream.id] = upstream_tool_names
+
+        return ToolRegistryState(
+            tools=merged_tools,
+            registry=registry,
+            upstream_tools=upstream_tools,
+            duplicates=self._find_duplicate_tool_assignments(tool_sources),
+        )
+
+    async def _apply_tool_registry_state(self, state: ToolRegistryState) -> None:
+        async with self._registry_lock:
+            self._tool_registry = dict(state.registry)
+            self._tool_alias_registry = self._build_tool_alias_registry(state.registry)
+            self._upstream_tools = {upstream_id: list(tool_names) for upstream_id, tool_names in state.upstream_tools.items()}
+
+    def _cache_ttl_seconds(self, upstream: UpstreamConfig) -> int:
+        ttl_minutes = upstream.cache_ttl_minutes or self._config.cache.default_ttl_minutes
+        return max(1, int(ttl_minutes)) * 60
+
+    def _replace_tool_name(
+        self,
+        payload: Dict[str, Any],
+        params: Optional[Dict[str, Any]],
+        tool_name: str,
+    ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        params_copy = dict(params or {})
+        if "name" in params_copy:
+            params_copy["name"] = tool_name
+        if "tool" in params_copy:
+            params_copy["tool"] = tool_name
+        payload_copy = dict(payload)
+        payload_copy["params"] = params_copy
+        return payload_copy, params_copy
 
     async def _safe_log_request(
         self,
@@ -336,6 +425,44 @@ class Gateway:
         resolved = self._tool_alias_registry.get(requested_tool_name)
         return resolved or requested_tool_name
 
+    async def _route_request(
+        self,
+        payload: Dict[str, Any],
+        method: str,
+        params: Optional[Dict[str, Any]],
+        client_id: Optional[str],
+    ) -> RoutedRequest:
+        requested_tool_name = self._get_tool_name(method, params)
+        tool_name = requested_tool_name
+        registry_upstream_id: Optional[str] = None
+
+        if method == "tools/call" and tool_name:
+            async with self._registry_lock:
+                resolved = self._resolve_tool_name(tool_name)
+                registry_upstream_id = self._tool_registry.get(resolved)
+            if resolved != tool_name:
+                payload, params = self._replace_tool_name(payload, params, resolved)
+                tool_name = resolved
+            else:
+                tool_name = resolved
+
+        upstream = self._upstream_by_id.get(registry_upstream_id) if registry_upstream_id else None
+        if upstream is None:
+            upstream = select_upstream(self._config.upstreams, self._routes, tool_name)
+
+        cache_key: Optional[str] = None
+        if upstream and self._is_cacheable(method, tool_name):
+            cache_key = self._cache_key(upstream, method, tool_name or "", params, client_id)
+
+        return RoutedRequest(
+            payload=payload,
+            params=params,
+            requested_tool_name=requested_tool_name,
+            tool_name=tool_name,
+            upstream=upstream,
+            cache_key=cache_key,
+        )
+
     def _log_upstream_stderr(self, upstream_id: str, line: str) -> None:
         event_name = "upstream_process_log"
         base_fields = {"upstream_id": upstream_id, "stream": "stderr", "line": line}
@@ -500,30 +627,162 @@ class Gateway:
         async with semaphore:
             await client.notify(payload)
 
+    async def _execute_upstream_operation(
+        self,
+        upstream: UpstreamConfig,
+        method: str,
+        payload: Dict[str, Any],
+        *,
+        notification: bool = False,
+    ) -> UpstreamExecution:
+        try:
+            if notification:
+                await self._notify_upstream(upstream, payload)
+                accepted = {"accepted": True}
+                return UpstreamExecution(success=True, payload=accepted, log_payload=accepted, error=None)
+
+            response = await self._call_upstream(upstream, payload)
+            error = response.payload.get("error")
+            return UpstreamExecution(
+                success=response.success,
+                payload=response.payload,
+                log_payload=response.payload,
+                error=error if isinstance(error, dict) else None,
+            )
+        except asyncio.TimeoutError:
+            error = {"code": -32002, "message": "Upstream timeout"}
+        except RuntimeError as exc:
+            error = {"code": -32004, "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            error = {"code": -32003, "message": f"Upstream error: {exc}"}
+
+        if notification:
+            return UpstreamExecution(
+                success=False,
+                payload={"accepted": False},
+                log_payload={"accepted": False, "error": error},
+                error=error,
+            )
+
+        error_payload = make_error_response(payload.get("id"), error["code"], error["message"])
+        return UpstreamExecution(
+            success=False,
+            payload=error_payload,
+            log_payload=error_payload,
+            error=error,
+        )
+
+    async def _load_cached_response(self, cache_key: str, request_id: UUID) -> Optional[Dict[str, Any]]:
+        cached = await self._memory_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        return await self._safe_cache_get(cache_key, request_id)
+
+    async def _log_request_start(
+        self,
+        request_id: UUID,
+        method: str,
+        params: Optional[Dict[str, Any]],
+        raw_request: Dict[str, Any],
+        upstream_id: Optional[str],
+        tool_name: Optional[str],
+        client_id: Optional[str],
+        cache_key: Optional[str],
+        requested_tool_name: Optional[str] = None,
+    ) -> None:
+        await self._safe_log_request(
+            request_id=request_id,
+            method=method,
+            params=params,
+            raw_request=raw_request,
+            upstream_id=upstream_id,
+            tool_name=tool_name,
+            client_id=client_id,
+            cache_key=cache_key,
+        )
+        self._logger.info(
+            "mcp_request",
+            request_id=str(request_id),
+            method=method,
+            upstream_id=upstream_id,
+            tool_name=tool_name,
+            tool_name_requested=requested_tool_name,
+            tool_alias=self._tool_alias(upstream_id, tool_name),
+            client_id=client_id,
+            cache_key=cache_key,
+        )
+
+    async def _finalize_request(
+        self,
+        request_id: UUID,
+        method: str,
+        response_payload: Dict[str, Any],
+        success: bool,
+        cache_hit: bool,
+        latency_ms: int,
+        upstream_id: Optional[str],
+        tool_name: Optional[str],
+        *,
+        log_response: bool = True,
+        store_payload: Optional[Dict[str, Any]] = None,
+        error: Optional[Dict[str, Any]] = None,
+        event_name: str = "mcp_response",
+        extra_log_fields: Optional[Dict[str, Any]] = None,
+    ) -> GatewayResult:
+        if log_response:
+            await self._safe_log_response(
+                response_id=uuid4(),
+                request_id=request_id,
+                success=success,
+                latency_ms=latency_ms,
+                cache_hit=cache_hit,
+                response=store_payload if store_payload is not None else response_payload,
+            )
+
+        log_fields: Dict[str, Any] = {
+            "request_id": str(request_id),
+            "method": method,
+            "upstream_id": upstream_id,
+            "tool_name": tool_name,
+            "tool_alias": self._tool_alias(upstream_id, tool_name),
+            "cache_hit": cache_hit,
+            "latency_ms": latency_ms,
+            "success": success,
+        }
+        if extra_log_fields:
+            log_fields.update(extra_log_fields)
+        if error is not None:
+            log_fields["error"] = error
+        self._logger.info(event_name, **log_fields)
+        self._telemetry.record_response(
+            method=method,
+            success=success,
+            cache_hit=cache_hit,
+            latency_ms=latency_ms,
+            upstream_id=upstream_id,
+            tool_name=tool_name,
+        )
+        return GatewayResult(
+            payload=response_payload,
+            success=success,
+            cache_hit=cache_hit,
+            upstream_id=upstream_id,
+            tool_name=tool_name,
+            request_id=request_id,
+        )
+
     async def _aggregate_list(self, payload: Dict[str, Any], method: str) -> Tuple[Dict[str, Any], bool, list[Dict[str, Any]]]:
         results: list[Dict[str, Any]] = []
         successful_upstreams = 0
-        optional_discovery_methods = {"resources/list", "resources/templates/list", "prompts/list"}
         upstream_errors: list[Dict[str, Any]] = []
 
         for upstream in self._config.upstreams:
-            try:
-                response = await self._call_upstream(upstream, payload)
-            except Exception as exc:  # noqa: BLE001
-                await self._record_health(upstream.id, method, False)
-                upstream_errors.append(
-                    {
-                        "upstream_id": upstream.id,
-                        "reason": "exception",
-                        "error": str(exc),
-                    }
-                )
-                continue
-            error = response.payload.get("error")
+            execution = await self._execute_upstream_operation(upstream, method, payload)
+            error = execution.error
             if isinstance(error, dict):
                 code = error.get("code")
                 # Some MCP servers do not implement optional discovery methods.
-                if code == -32601 and method in optional_discovery_methods:
+                if code == -32601 and method in OPTIONAL_DISCOVERY_METHODS:
                     await self._record_health(upstream.id, method, True)
                     successful_upstreams += 1
                     results.append({"upstream": upstream, "result": {}})
@@ -538,7 +797,7 @@ class Gateway:
                     }
                 )
                 continue
-            result = response.payload.get("result")
+            result = execution.payload.get("result")
             if isinstance(result, dict):
                 await self._record_health(upstream.id, method, True)
                 successful_upstreams += 1
@@ -554,39 +813,20 @@ class Gateway:
 
         merged: Dict[str, Any] = {}
         if method == "tools/list":
-            seen: set[str] = set()
-            tools: list[Dict[str, Any]] = []
-            registry: Dict[str, str] = {}
-            tool_sources: Dict[str, set[str]] = {}
-            upstream_tools: Dict[str, list[str]] = {}
-            for item in results:
-                upstream = item["upstream"]
-                upstream_tool_names: list[str] = []
-                for tool in item["result"].get("tools", []) or []:
-                    name = tool.get("name")
-                    if not name:
-                        continue
-                    if name not in upstream_tool_names:
-                        upstream_tool_names.append(name)
-                    tool_sources.setdefault(name, set()).add(upstream.id)
-                    # Keep full registry (including denied tools) so tools/call can
-                    # be routed and then explicitly denied with a clear error message.
-                    registry[name] = upstream.id
-                    if name in seen:
-                        continue
-                    seen.add(name)
-                    tools.append(tool)
-                upstream_tools[upstream.id] = upstream_tool_names
-            duplicates = self._find_duplicate_tool_assignments(tool_sources)
-            if duplicates:
-                message = self._duplicate_tool_message(duplicates)
-                upstream_errors.append({"reason": "duplicate_tools", "duplicates": {k: sorted(v) for k, v in duplicates.items()}})
+            registry_state = self._build_tool_registry_state(
+                [(item["upstream"], item["result"].get("tools", []) or []) for item in results]
+            )
+            if registry_state.duplicates:
+                message = self._duplicate_tool_message(registry_state.duplicates)
+                upstream_errors.append(
+                    {
+                        "reason": "duplicate_tools",
+                        "duplicates": {name: sorted(upstream_ids) for name, upstream_ids in registry_state.duplicates.items()},
+                    }
+                )
                 return make_error_response(payload.get("id"), -32003, message), False, upstream_errors
-            merged["tools"] = tools
-            async with self._registry_lock:
-                self._tool_registry = registry
-                self._tool_alias_registry = self._build_tool_alias_registry(registry)
-                self._upstream_tools.update(upstream_tools)
+            merged["tools"] = registry_state.tools
+            await self._apply_tool_registry_state(registry_state)
         elif method == "resources/list":
             seen = set()
             resources: list[Dict[str, Any]] = []
@@ -665,19 +905,12 @@ class Gateway:
         server_version = "0.1.0"
 
         for upstream in self._config.upstreams:
-            try:
-                response = await self._call_upstream(upstream, payload)
-            except Exception:  # noqa: BLE001
-                await self._record_health(upstream.id, "initialize", False)
+            execution = await self._execute_upstream_operation(upstream, "initialize", payload)
+            result = execution.payload.get("result")
+            success = execution.success and isinstance(result, dict)
+            await self._record_health(upstream.id, "initialize", success)
+            if not success:
                 continue
-            if not response.success:
-                await self._record_health(upstream.id, "initialize", False)
-                continue
-            result = response.payload.get("result")
-            if not isinstance(result, dict):
-                await self._record_health(upstream.id, "initialize", False)
-                continue
-            await self._record_health(upstream.id, "initialize", True)
             successful += 1
             if protocol_version is None and isinstance(result.get("protocolVersion"), str):
                 protocol_version = result["protocolVersion"]
@@ -699,19 +932,20 @@ class Gateway:
     async def _fanout_initialized_notification(self, payload: Dict[str, Any]) -> bool:
         successful = 0
         for upstream in self._config.upstreams:
-            try:
-                await self._notify_upstream(upstream, payload)
-                await self._record_health(upstream.id, "notifications/initialized", True)
+            execution = await self._execute_upstream_operation(
+                upstream,
+                "notifications/initialized",
+                payload,
+                notification=True,
+            )
+            await self._record_health(upstream.id, "notifications/initialized", execution.success)
+            if execution.success:
                 successful += 1
-            except Exception:  # noqa: BLE001
-                await self._record_health(upstream.id, "notifications/initialized", False)
-                continue
         return successful > 0
 
     async def warmup(self) -> None:
         # Prime upstream sessions and seed tool registry before client traffic.
-        registry_updates: Dict[str, str] = {}
-        tool_sources: Dict[str, set[str]] = {}
+        tool_payloads: list[tuple[UpstreamConfig, list[Dict[str, Any]]]] = []
         for upstream in self._config.upstreams:
             init_success = False
             tools_list_success = False
@@ -729,14 +963,10 @@ class Gateway:
                     "clientInfo": {"name": "mcp-gateway", "version": "0.1.0"},
                 },
             }
-            try:
-                init_response = await self._call_upstream(upstream, init_payload)
-                init_success = init_response.success and isinstance(init_response.payload.get("result"), dict)
-                if not init_success:
-                    init_error = init_response.payload.get("error") if isinstance(init_response.payload, dict) else None
-            except Exception:  # noqa: BLE001
-                init_success = False
-                init_error = {"message": "exception during initialize"}
+            init_execution = await self._execute_upstream_operation(upstream, "initialize", init_payload)
+            init_success = init_execution.success and isinstance(init_execution.payload.get("result"), dict)
+            if not init_success:
+                init_error = init_execution.error
             await self._record_health(upstream.id, "initialize", init_success)
 
             if init_success:
@@ -745,11 +975,13 @@ class Gateway:
                     "method": "notifications/initialized",
                     "params": {},
                 }
-                try:
-                    await self._notify_upstream(upstream, notify_payload)
-                    await self._record_health(upstream.id, "notifications/initialized", True)
-                except Exception:  # noqa: BLE001
-                    await self._record_health(upstream.id, "notifications/initialized", False)
+                notify_execution = await self._execute_upstream_operation(
+                    upstream,
+                    "notifications/initialized",
+                    notify_payload,
+                    notification=True,
+                )
+                await self._record_health(upstream.id, "notifications/initialized", notify_execution.success)
 
             tools_payload = {
                 "jsonrpc": "2.0",
@@ -757,24 +989,16 @@ class Gateway:
                 "method": "tools/list",
                 "params": {},
             }
-            try:
-                tools_response = await self._call_upstream(upstream, tools_payload)
-                result = tools_response.payload.get("result")
-                if tools_response.success and isinstance(result, dict):
-                    tools = result.get("tools", []) or []
-                    tool_names = [t.get("name") for t in tools if isinstance(t, dict) and isinstance(t.get("name"), str)]
-                    tools_list_success = True
-                    for tool_name in tool_names:
-                        tool_sources.setdefault(tool_name, set()).add(upstream.id)
-                        # Keep denied tools in the registry so tool invocations can be
-                        # rejected by policy with an explicit deny response.
-                        registry_updates[tool_name] = upstream.id
-                else:
-                    tools_list_success = False
-                    tools_list_error = tools_response.payload.get("error") if isinstance(tools_response.payload, dict) else None
-            except Exception:  # noqa: BLE001
+            tools_execution = await self._execute_upstream_operation(upstream, "tools/list", tools_payload)
+            result = tools_execution.payload.get("result")
+            if tools_execution.success and isinstance(result, dict):
+                tools = result.get("tools", []) or []
+                tool_payloads.append((upstream, tools))
+                tool_names = [t.get("name") for t in tools if isinstance(t, dict) and isinstance(t.get("name"), str)]
+                tools_list_success = True
+            else:
                 tools_list_success = False
-                tools_list_error = {"message": "exception during tools/list"}
+                tools_list_error = tools_execution.error
             await self._record_health(upstream.id, "tools/list", tools_list_success)
 
             self._logger.info(
@@ -796,16 +1020,10 @@ class Gateway:
                 "tools": tool_names,
             }
 
-        duplicates = self._find_duplicate_tool_assignments(tool_sources)
-        if duplicates:
-            raise RuntimeError(self._duplicate_tool_message(duplicates))
-
-        if registry_updates:
-            async with self._registry_lock:
-                self._tool_registry.update(registry_updates)
-                self._tool_alias_registry = self._build_tool_alias_registry(self._tool_registry)
-                for upstream_id, status in self._warmup_status.items():
-                    self._upstream_tools[upstream_id] = list(status.get("tools", []))
+        registry_state = self._build_tool_registry_state(tool_payloads)
+        if registry_state.duplicates:
+            raise RuntimeError(self._duplicate_tool_message(registry_state.duplicates))
+        await self._apply_tool_registry_state(registry_state)
 
     async def handle(self, payload: Dict[str, Any], client_id: Optional[str]) -> GatewayResult:
         request_id = uuid4()
@@ -813,102 +1031,53 @@ class Gateway:
         params = payload.get("params")
         if not isinstance(method, str):
             error_payload = make_error_response(payload.get("id"), -32600, "Invalid Request")
-            self._telemetry.record_response(
+            return await self._finalize_request(
+                request_id=request_id,
                 method="invalid",
+                response_payload=error_payload,
                 success=False,
                 cache_hit=False,
                 latency_ms=0,
                 upstream_id=None,
                 tool_name=None,
-            )
-            return GatewayResult(
-                payload=error_payload,
-                success=False,
-                cache_hit=False,
-                upstream_id=None,
-                tool_name=None,
-                request_id=request_id,
+                log_response=False,
+                error=error_payload.get("error"),
             )
         self._telemetry.record_request(method)
+
         if method == "initialize":
-            await self._safe_log_request(
+            await self._log_request_start(
                 request_id=request_id,
                 method=method,
                 params=params,
                 raw_request=payload,
                 upstream_id="*",
                 tool_name=None,
-                client_id=client_id,
-                cache_key=None,
-            )
-            self._logger.info(
-                "mcp_request",
-                request_id=str(request_id),
-                method=method,
-                upstream_id="*",
-                tool_name=None,
-                tool_alias=None,
                 client_id=client_id,
                 cache_key=None,
             )
             timer = Timer()
             response_payload, success = await self._fanout_initialize(payload)
-            latency_ms = timer.elapsed_ms()
-            await self._safe_log_response(
-                response_id=uuid4(),
+            return await self._finalize_request(
                 request_id=request_id,
-                success=success,
-                latency_ms=latency_ms,
-                cache_hit=False,
-                response=response_payload,
-            )
-            self._logger.info(
-                "mcp_response",
-                request_id=str(request_id),
                 method=method,
-                upstream_id="*",
-                tool_name=None,
-                tool_alias=None,
-                cache_hit=False,
-                latency_ms=latency_ms,
-                success=success,
-                error=response_payload.get("error"),
-            )
-            self._telemetry.record_response(
-                method=method,
+                response_payload=response_payload,
                 success=success,
                 cache_hit=False,
-                latency_ms=latency_ms,
+                latency_ms=timer.elapsed_ms(),
                 upstream_id="*",
                 tool_name=None,
-            )
-            return GatewayResult(
-                payload=response_payload,
-                success=success,
-                cache_hit=False,
-                upstream_id="*",
-                tool_name=None,
-                request_id=request_id,
+                error=response_payload.get("error") if isinstance(response_payload.get("error"), dict) else None,
             )
 
         if method == "notifications/initialized" and payload.get("id") is None:
-            await self._safe_log_request(
+            await self._log_request_start(
                 request_id=request_id,
                 method=method,
                 params=params,
                 raw_request=payload,
                 upstream_id="*",
                 tool_name=None,
-                client_id=client_id,
-                cache_key=None,
-            )
-            self._logger.info(
-                "mcp_request",
-                request_id=str(request_id),
-                method=method,
-                upstream_id="*",
-                tool_name=None,
-                tool_alias=None,
                 client_id=client_id,
                 cache_key=None,
             )
@@ -916,371 +1085,151 @@ class Gateway:
             success = await self._fanout_initialized_notification(payload)
             latency_ms = timer.elapsed_ms()
             response_payload = {"accepted": success}
-            await self._safe_log_response(
-                response_id=uuid4(),
+            return await self._finalize_request(
                 request_id=request_id,
-                success=success,
-                latency_ms=latency_ms,
-                cache_hit=False,
-                response=response_payload,
-            )
-            self._logger.info(
-                "mcp_response",
-                request_id=str(request_id),
                 method=method,
-                upstream_id="*",
-                tool_name=None,
-                tool_alias=None,
-                cache_hit=False,
-                latency_ms=latency_ms,
-                success=success,
-            )
-            self._telemetry.record_response(
-                method=method,
+                response_payload=response_payload,
                 success=success,
                 cache_hit=False,
                 latency_ms=latency_ms,
                 upstream_id="*",
                 tool_name=None,
-            )
-            return GatewayResult(
-                payload=response_payload,
-                success=success,
-                cache_hit=False,
-                upstream_id="*",
-                tool_name=None,
-                request_id=request_id,
             )
 
-        requested_tool_name = self._get_tool_name(method, params)
-        tool_name = requested_tool_name
-        if method == "tools/call" and tool_name:
-            async with self._registry_lock:
-                resolved = self._resolve_tool_name(tool_name)
-            if resolved != tool_name:
-                tool_name = resolved
-                params_copy = dict(params or {})
-                if "name" in params_copy:
-                    params_copy["name"] = tool_name
-                if "tool" in params_copy:
-                    params_copy["tool"] = tool_name
-                payload = dict(payload)
-                payload["params"] = params_copy
-                params = params_copy
-        upstream = None
-        if method == "tools/call" and tool_name:
-            async with self._registry_lock:
-                upstream_id = self._tool_registry.get(tool_name)
-            if upstream_id:
-                for candidate in self._config.upstreams:
-                    if candidate.id == upstream_id:
-                        upstream = candidate
-                        break
-        if upstream is None:
-            upstream = select_upstream(self._config.upstreams, self._routes, tool_name)
-        cache_key: Optional[str] = None
-
-        if not upstream:
+        routed = await self._route_request(payload, method, params, client_id)
+        if not routed.upstream:
             error_payload = make_error_response(payload.get("id"), -32000, "No upstream configured")
-            self._telemetry.record_response(
+            return await self._finalize_request(
+                request_id=request_id,
                 method=method,
+                response_payload=error_payload,
                 success=False,
                 cache_hit=False,
                 latency_ms=0,
                 upstream_id=None,
-                tool_name=tool_name,
+                tool_name=routed.tool_name,
+                log_response=False,
+                error=error_payload.get("error"),
             )
-            return GatewayResult(
-                payload=error_payload,
-                success=False,
-                cache_hit=False,
-                upstream_id=None,
-                tool_name=tool_name,
-                request_id=request_id,
-            )
-
-        if self._is_cacheable(method, tool_name):
-            cache_key = self._cache_key(upstream, method, tool_name or "", params, client_id)
-
-        await self._safe_log_request(
+        await self._log_request_start(
             request_id=request_id,
-            method=method or "",
-            params=params,
-            raw_request=payload,
-            upstream_id=upstream.id,
-            tool_name=tool_name,
-            client_id=client_id,
-            cache_key=cache_key,
-        )
-        self._logger.info(
-            "mcp_request",
-            request_id=str(request_id),
             method=method,
-            upstream_id=upstream.id,
-            tool_name=tool_name,
-            tool_name_requested=requested_tool_name,
-            tool_alias=self._tool_alias(upstream.id, tool_name),
+            params=routed.params,
+            raw_request=routed.payload,
+            upstream_id=routed.upstream.id,
+            tool_name=routed.tool_name,
             client_id=client_id,
-            cache_key=cache_key,
+            cache_key=routed.cache_key,
+            requested_tool_name=routed.requested_tool_name,
         )
 
-        if method in {"tools/list", "resources/list", "resources/templates/list", "prompts/list"}:
+        if method in DISCOVERY_METHODS:
             timer = Timer()
-            response_payload, success, upstream_errors = await self._aggregate_list(payload, method)
-            latency_ms = timer.elapsed_ms()
-            await self._safe_log_response(
-                response_id=uuid4(),
+            response_payload, success, upstream_errors = await self._aggregate_list(routed.payload, method)
+            return await self._finalize_request(
                 request_id=request_id,
-                success=success,
-                latency_ms=latency_ms,
-                cache_hit=False,
-                response=response_payload,
-            )
-            self._logger.info(
-                "mcp_response",
-                request_id=str(request_id),
                 method=method,
-                upstream_id="*",
-                tool_name=None,
-                cache_hit=False,
-                latency_ms=latency_ms,
-                success=success,
-                upstream_error_count=len(upstream_errors),
-                upstream_errors=upstream_errors,
-            )
-            self._telemetry.record_response(
-                method=method,
+                response_payload=response_payload,
                 success=success,
                 cache_hit=False,
-                latency_ms=latency_ms,
+                latency_ms=timer.elapsed_ms(),
                 upstream_id="*",
                 tool_name=None,
-            )
-            return GatewayResult(
-                payload=response_payload,
-                success=success,
-                cache_hit=False,
-                upstream_id="*",
-                tool_name=None,
-                request_id=request_id,
+                error=response_payload.get("error") if isinstance(response_payload.get("error"), dict) else None,
+                extra_log_fields={
+                    "upstream_error_count": len(upstream_errors),
+                    "upstream_errors": upstream_errors,
+                },
             )
 
-        denial_reason = self._deny(upstream, tool_name)
+        denial_reason = self._deny(routed.upstream, routed.tool_name)
         if denial_reason:
             denial_payload = make_error_response(
-                payload.get("id"),
+                routed.payload.get("id"),
                 -32001,
                 "Blocked by gateway policy: tool not allowed",
                 data={
                     "category": "policy_denied",
                     "enforcer": "mcp-gateway",
-                    "upstream_id": upstream.id,
-                    "tool_name": tool_name,
+                    "upstream_id": routed.upstream.id,
+                    "tool_name": routed.tool_name,
                     "policy_type": "deny_tools",
                     "retryable": False,
                     "suggestion": "Use an allowed tool or contact gateway admin to update deny_tools policy.",
                 },
             )
             denial_id = uuid4()
-            await self._safe_log_denial(denial_id, request_id, upstream.id, tool_name, denial_reason)
-            self._logger.info(
-                "mcp_denied",
-                request_id=str(request_id),
-                upstream_id=upstream.id,
-                tool_name=tool_name,
-                tool_alias=self._tool_alias(upstream.id, tool_name),
-                reason=denial_reason,
-            )
-            self._telemetry.record_denial(upstream.id, tool_name)
-            self._telemetry.record_response(
+            await self._safe_log_denial(denial_id, request_id, routed.upstream.id, routed.tool_name, denial_reason)
+            self._telemetry.record_denial(routed.upstream.id, routed.tool_name)
+            return await self._finalize_request(
+                request_id=request_id,
                 method=method,
+                response_payload=denial_payload,
                 success=False,
                 cache_hit=False,
                 latency_ms=0,
-                upstream_id=upstream.id,
-                tool_name=tool_name,
-            )
-            return GatewayResult(
-                payload=denial_payload,
-                success=False,
-                cache_hit=False,
-                upstream_id=upstream.id,
-                tool_name=tool_name,
-                request_id=request_id,
+                upstream_id=routed.upstream.id,
+                tool_name=routed.tool_name,
+                log_response=False,
+                event_name="mcp_denied",
+                error=denial_payload.get("error"),
+                extra_log_fields={"reason": denial_reason},
             )
 
-        if payload.get("id") is None:
+        if routed.payload.get("id") is None:
             timer = Timer()
-            success = True
-            error: Optional[Dict[str, Any]] = None
-            try:
-                await self._notify_upstream(upstream, payload)
-                await self._record_health(upstream.id, method, True)
-            except asyncio.TimeoutError:
-                await self._record_health(upstream.id, method, False)
-                success = False
-                error = {"code": -32002, "message": "Upstream timeout"}
-            except RuntimeError as exc:
-                await self._record_health(upstream.id, method, False)
-                success = False
-                error = {"code": -32004, "message": str(exc)}
-            except Exception as exc:  # noqa: BLE001
-                await self._record_health(upstream.id, method, False)
-                success = False
-                error = {"code": -32003, "message": f"Upstream error: {exc}"}
+            execution = await self._execute_upstream_operation(
+                routed.upstream,
+                method,
+                routed.payload,
+                notification=True,
+            )
+            await self._record_health(routed.upstream.id, method, execution.success)
+            return await self._finalize_request(
+                request_id=request_id,
+                method=method,
+                response_payload=execution.payload,
+                success=execution.success,
+                cache_hit=False,
+                latency_ms=timer.elapsed_ms(),
+                upstream_id=routed.upstream.id,
+                tool_name=routed.tool_name,
+                store_payload=execution.log_payload,
+                error=execution.error,
+            )
 
-            latency_ms = timer.elapsed_ms()
-            response_payload: Dict[str, Any] = {"accepted": success}
-            await self._safe_log_response(
-                response_id=uuid4(),
-                request_id=request_id,
-                success=success,
-                latency_ms=latency_ms,
-                cache_hit=False,
-                response=response_payload if error is None else {"accepted": False, "error": error},
-            )
-            self._logger.info(
-                "mcp_response",
-                request_id=str(request_id),
-                method=method,
-                upstream_id=upstream.id,
-                tool_name=tool_name,
-                tool_alias=self._tool_alias(upstream.id, tool_name),
-                cache_hit=False,
-                latency_ms=latency_ms,
-                success=success,
-                error=error,
-            )
-            self._telemetry.record_response(
-                method=method,
-                success=success,
-                cache_hit=False,
-                latency_ms=latency_ms,
-                upstream_id=upstream.id,
-                tool_name=tool_name,
-            )
-            return GatewayResult(
-                payload=response_payload,
-                success=success,
-                cache_hit=False,
-                upstream_id=upstream.id,
-                tool_name=tool_name,
-                request_id=request_id,
-            )
+        if routed.cache_key:
+            timer = Timer()
+            cached = await self._load_cached_response(routed.cache_key, request_id)
+            if cached is not None:
+                return await self._finalize_request(
+                    request_id=request_id,
+                    method=method,
+                    response_payload=cached,
+                    success=True,
+                    cache_hit=True,
+                    latency_ms=timer.elapsed_ms(),
+                    upstream_id=routed.upstream.id,
+                    tool_name=routed.tool_name,
+                )
 
         timer = Timer()
-        cache_hit = False
-
-        if cache_key:
-            cached = await self._memory_cache.get(cache_key)
-            if cached is None:
-                cached = await self._safe_cache_get(cache_key, request_id)
-            if cached is not None:
-                cache_hit = True
-                response_payload = cached
-                await self._safe_log_response(
-                    response_id=uuid4(),
-                    request_id=request_id,
-                    success=True,
-                    latency_ms=timer.elapsed_ms(),
-                    cache_hit=True,
-                    response=response_payload,
-                )
-                self._logger.info(
-                    "mcp_response",
-                    request_id=str(request_id),
-                    method=method,
-                    upstream_id=upstream.id,
-                    tool_name=tool_name,
-                    tool_alias=self._tool_alias(upstream.id, tool_name),
-                    cache_hit=True,
-                    latency_ms=timer.elapsed_ms(),
-                )
-                self._telemetry.record_response(
-                    method=method,
-                    success=True,
-                    cache_hit=True,
-                    latency_ms=timer.elapsed_ms(),
-                    upstream_id=upstream.id,
-                    tool_name=tool_name,
-                )
-                return GatewayResult(
-                    payload=response_payload,
-                    success=True,
-                    cache_hit=True,
-                    upstream_id=upstream.id,
-                    tool_name=tool_name,
-                    request_id=request_id,
-                )
-
-        try:
-            response = await self._call_upstream(upstream, payload)
-            success = response.success
-            await self._record_health(upstream.id, method, success)
-        except asyncio.TimeoutError:
-            await self._record_health(upstream.id, method, False)
-            response = UpstreamResponse(
-                payload=make_error_response(payload.get("id"), -32002, "Upstream timeout"),
-                success=False,
-            )
-            success = False
-        except RuntimeError as exc:
-            await self._record_health(upstream.id, method, False)
-            response = UpstreamResponse(
-                payload=make_error_response(payload.get("id"), -32004, str(exc)),
-                success=False,
-            )
-            success = False
-        except Exception as exc:  # noqa: BLE001
-            await self._record_health(upstream.id, method, False)
-            response = UpstreamResponse(
-                payload=make_error_response(payload.get("id"), -32003, f"Upstream error: {exc}"),
-                success=False,
-            )
-            success = False
-
-        latency_ms = timer.elapsed_ms()
-        await self._safe_log_response(
-            response_id=uuid4(),
+        execution = await self._execute_upstream_operation(routed.upstream, method, routed.payload)
+        await self._record_health(routed.upstream.id, method, execution.success)
+        result = await self._finalize_request(
             request_id=request_id,
-            success=success,
-            latency_ms=latency_ms,
-            cache_hit=cache_hit,
-            response=response.payload,
-        )
-
-        self._logger.info(
-            "mcp_response",
-            request_id=str(request_id),
             method=method,
-            upstream_id=upstream.id,
-            tool_name=tool_name,
-            tool_alias=self._tool_alias(upstream.id, tool_name),
-            cache_hit=cache_hit,
-            latency_ms=latency_ms,
-            success=success,
-            error=response.payload.get("error"),
+            response_payload=execution.payload,
+            success=execution.success,
+            cache_hit=False,
+            latency_ms=timer.elapsed_ms(),
+            upstream_id=routed.upstream.id,
+            tool_name=routed.tool_name,
+            store_payload=execution.log_payload,
+            error=execution.error,
         )
-        self._telemetry.record_response(
-            method=method,
-            success=success,
-            cache_hit=cache_hit,
-            latency_ms=latency_ms,
-            upstream_id=upstream.id,
-            tool_name=tool_name,
-        )
-
-        if cache_key and success:
-            ttl_minutes = upstream.cache_ttl_minutes or self._config.cache.default_ttl_minutes
-            ttl_seconds = max(1, int(ttl_minutes)) * 60
-            await self._memory_cache.set(cache_key, response.payload, ttl_seconds)
-            await self._safe_cache_set(cache_key, response.payload, ttl_seconds, request_id)
-
-        return GatewayResult(
-            payload=response.payload,
-            success=success,
-            cache_hit=cache_hit,
-            upstream_id=upstream.id,
-            tool_name=tool_name,
-            request_id=request_id,
-        )
+        if routed.cache_key and execution.success:
+            ttl_seconds = self._cache_ttl_seconds(routed.upstream)
+            await self._memory_cache.set(routed.cache_key, execution.payload, ttl_seconds)
+            await self._safe_cache_set(routed.cache_key, execution.payload, ttl_seconds, request_id)
+        return result

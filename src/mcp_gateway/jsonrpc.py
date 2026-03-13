@@ -10,8 +10,24 @@ def json_dumps(value: Any) -> str:
     return orjson.dumps(value).decode("utf-8")
 
 
+def _normalize_cache_params(value: Any) -> Any:
+    if isinstance(value, dict):
+        normalized: Dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "_meta" and isinstance(item, dict):
+                meta = {meta_key: _normalize_cache_params(meta_value) for meta_key, meta_value in item.items() if meta_key != "progressToken"}
+                if meta:
+                    normalized[key] = meta
+                continue
+            normalized[key] = _normalize_cache_params(item)
+        return normalized
+    if isinstance(value, list):
+        return [_normalize_cache_params(item) for item in value]
+    return value
+
+
 def normalize_params(params: Any) -> str:
-    return json.dumps(params, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return json.dumps(_normalize_cache_params(params), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def make_error_response(request_id: Any, code: int, message: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

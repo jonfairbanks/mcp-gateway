@@ -20,11 +20,34 @@ class GatewayConfig:
     sse_queue_max_messages: int
     max_sse_sessions: int
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
+        return cls(
+            listen_host=_get(data, "listen_host", "0.0.0.0"),
+            listen_port=int(_get(data, "listen_port", 8080)),
+            api_key=_get(data, "api_key", ""),
+            allow_unauthenticated=bool(_get(data, "allow_unauthenticated", False)),
+            trusted_proxies=[str(proxy) for proxy in list(_get(data, "trusted_proxies", ["127.0.0.1", "::1"]))],
+            request_max_bytes=int(_get(data, "request_max_bytes", 2 * 1024 * 1024)),
+            rate_limit_per_minute=int(_get(data, "rate_limit_per_minute", 120)),
+            circuit_breaker_fail_threshold=int(_get(data, "circuit_breaker_fail_threshold", 20)),
+            circuit_breaker_open_seconds=int(_get(data, "circuit_breaker_open_seconds", 30)),
+            sse_queue_max_messages=int(_get(data, "sse_queue_max_messages", 100)),
+            max_sse_sessions=int(_get(data, "max_sse_sessions", 1000)),
+        )
+
 
 @dataclass
 class LoggingConfig:
     stdout_json: bool
     extra_redact_fields: List[str]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "LoggingConfig":
+        return cls(
+            stdout_json=bool(_get(data, "stdout_json", True)),
+            extra_redact_fields=[str(field) for field in list(_get(data, "extra_redact_fields", []))],
+        )
 
 
 @dataclass
@@ -33,6 +56,15 @@ class CacheConfig:
     max_entries: int
     default_ttl_minutes: int
     client_scoped_tools: List[str]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CacheConfig":
+        return cls(
+            enabled=bool(_get(data, "enabled", True)),
+            max_entries=int(_get(data, "max_entries", 1000)),
+            default_ttl_minutes=int(_get(data, "default_ttl_minutes", 60)),
+            client_scoped_tools=[str(tool) for tool in list(_get(data, "client_scoped_tools", []))],
+        )
 
 
 @dataclass
@@ -56,6 +88,29 @@ class UpstreamConfig:
     circuit_breaker_open_seconds: Optional[int]
     tool_routes: List[str]
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "UpstreamConfig":
+        return cls(
+            id=data["id"],
+            name=data.get("name", data["id"]),
+            transport=data["transport"],
+            endpoint=data.get("endpoint"),
+            http_headers={str(key): str(value) for key, value in (data.get("http_headers", {}) or {}).items()},
+            bearer_token_env_var=data.get("bearer_token_env_var"),
+            http_serialize_requests=bool(data.get("http_serialize_requests", False)),
+            command=_normalize_stdio_command(data),
+            env={str(key): str(value) for key, value in (data.get("env", {}) or {}).items()},
+            cwd=data.get("cwd"),
+            timeout_ms=int(data.get("timeout_ms", 10000)),
+            stdio_read_limit_bytes=int(data.get("stdio_read_limit_bytes", 100 * 1024 * 1024)),
+            max_in_flight=int(data.get("max_in_flight", 20)),
+            deny_tools=[str(tool) for tool in (data.get("deny_tools", []) or [])],
+            cache_ttl_minutes=_optional_int(data.get("cache_ttl_minutes")),
+            circuit_breaker_fail_threshold=_optional_int(data.get("circuit_breaker_fail_threshold")),
+            circuit_breaker_open_seconds=_optional_int(data.get("circuit_breaker_open_seconds")),
+            tool_routes=[str(route) for route in (data.get("tool_routes", []) or [])],
+        )
+
 
 @dataclass
 class AppConfig:
@@ -64,12 +119,27 @@ class AppConfig:
     cache: CacheConfig
     upstreams: List[UpstreamConfig]
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AppConfig":
+        return cls(
+            gateway=GatewayConfig.from_dict(data.get("gateway", {})),
+            logging=LoggingConfig.from_dict(data.get("logging", {})),
+            cache=CacheConfig.from_dict(data.get("cache", {})),
+            upstreams=[UpstreamConfig.from_dict(item) for item in (data.get("upstreams", []) or [])],
+        )
+
 
 def _get(data: Dict[str, Any], key: str, default: Any) -> Any:
     value = data.get(key, default)
     if value is None:
         return default
     return value
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    return int(value)
 
 
 def _normalize_stdio_command(item: Dict[str, Any]) -> Optional[List[str]]:
@@ -97,65 +167,4 @@ def _normalize_stdio_command(item: Dict[str, Any]) -> Optional[List[str]]:
 def load_config(path: str) -> AppConfig:
     with open(path, "r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
-
-    gateway_raw = raw.get("gateway", {})
-    logging_raw = raw.get("logging", {})
-    cache_raw = raw.get("cache", {})
-
-    gateway = GatewayConfig(
-        listen_host=_get(gateway_raw, "listen_host", "0.0.0.0"),
-        listen_port=int(_get(gateway_raw, "listen_port", 8080)),
-        api_key=_get(gateway_raw, "api_key", ""),
-        allow_unauthenticated=bool(_get(gateway_raw, "allow_unauthenticated", False)),
-        trusted_proxies=list(_get(gateway_raw, "trusted_proxies", ["127.0.0.1", "::1"])),
-        request_max_bytes=int(_get(gateway_raw, "request_max_bytes", 2 * 1024 * 1024)),
-        rate_limit_per_minute=int(_get(gateway_raw, "rate_limit_per_minute", 120)),
-        circuit_breaker_fail_threshold=int(_get(gateway_raw, "circuit_breaker_fail_threshold", 20)),
-        circuit_breaker_open_seconds=int(_get(gateway_raw, "circuit_breaker_open_seconds", 30)),
-        sse_queue_max_messages=int(_get(gateway_raw, "sse_queue_max_messages", 100)),
-        max_sse_sessions=int(_get(gateway_raw, "max_sse_sessions", 1000)),
-    )
-
-    logging_cfg = LoggingConfig(
-        stdout_json=bool(_get(logging_raw, "stdout_json", True)),
-        extra_redact_fields=[str(field) for field in list(_get(logging_raw, "extra_redact_fields", []))],
-    )
-
-    cache_cfg = CacheConfig(
-        enabled=bool(_get(cache_raw, "enabled", True)),
-        max_entries=int(_get(cache_raw, "max_entries", 1000)),
-        default_ttl_minutes=int(_get(cache_raw, "default_ttl_minutes", 60)),
-        client_scoped_tools=list(_get(cache_raw, "client_scoped_tools", [])),
-    )
-
-    upstreams = []
-    for item in raw.get("upstreams", []) or []:
-        upstreams.append(
-            UpstreamConfig(
-                id=item["id"],
-                name=item.get("name", item["id"]),
-                transport=item["transport"],
-                endpoint=item.get("endpoint"),
-                http_headers=item.get("http_headers", {}) or {},
-                bearer_token_env_var=item.get("bearer_token_env_var"),
-                http_serialize_requests=bool(item.get("http_serialize_requests", False)),
-                command=_normalize_stdio_command(item),
-                env=item.get("env", {}) or {},
-                cwd=item.get("cwd"),
-                timeout_ms=int(item.get("timeout_ms", 10000)),
-                stdio_read_limit_bytes=int(item.get("stdio_read_limit_bytes", 100 * 1024 * 1024)),
-                max_in_flight=int(item.get("max_in_flight", 20)),
-                deny_tools=item.get("deny_tools", []) or [],
-                cache_ttl_minutes=(int(item["cache_ttl_minutes"]) if item.get("cache_ttl_minutes") is not None else None),
-                circuit_breaker_fail_threshold=item.get("circuit_breaker_fail_threshold"),
-                circuit_breaker_open_seconds=item.get("circuit_breaker_open_seconds"),
-                tool_routes=item.get("tool_routes", []) or [],
-            )
-        )
-
-    return AppConfig(
-        gateway=gateway,
-        logging=logging_cfg,
-        cache=cache_cfg,
-        upstreams=upstreams,
-    )
+    return AppConfig.from_dict(raw)
