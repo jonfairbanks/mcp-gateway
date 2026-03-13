@@ -1,14 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from .config import UpstreamConfig
-
-
-@dataclass
-class RouteResult:
-    upstream: UpstreamConfig
 
 
 def build_routes(upstreams: List[UpstreamConfig]) -> Dict[str, UpstreamConfig]:
