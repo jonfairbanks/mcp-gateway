@@ -241,6 +241,46 @@ def test_warmup_fails_on_duplicate_tool_names() -> None:
     raise AssertionError("warmup should fail on duplicate tool names")
 
 
+def test_startup_summary_reports_ready_and_failed_upstreams() -> None:
+    config = _config_with_upstreams([_upstream("ready"), _upstream("failed")])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    gateway._warmup_status = {
+        "ready": {
+            "initialize_success": True,
+            "initialize_error": None,
+            "tools_list_success": True,
+            "tools_list_error": None,
+            "tool_count": 2,
+            "tools": ["one", "two"],
+        },
+        "failed": {
+            "initialize_success": False,
+            "initialize_error": {"message": "aws login required"},
+            "tools_list_success": False,
+            "tools_list_error": {"message": "Invalid request parameters"},
+            "tool_count": 0,
+            "tools": [],
+        },
+    }
+
+    summary = gateway.startup_summary()
+
+    assert summary["gateway_ready"] is True
+    assert summary["ready_upstream_count"] == 1
+    assert summary["degraded_upstream_count"] == 0
+    assert summary["failed_upstream_count"] == 1
+    assert summary["upstreams"] == [
+        {"id": "ready", "status": "ready", "tool_count": 2},
+        {
+            "id": "failed",
+            "status": "failed",
+            "tool_count": 0,
+            "stage": "initialize",
+            "reason": "aws login required",
+        },
+    ]
+
+
 def test_enqueue_session_payload_closes_session_when_queue_is_full() -> None:
     config = _config_with_upstreams([_upstream()])
     config.gateway.sse_queue_max_messages = 1

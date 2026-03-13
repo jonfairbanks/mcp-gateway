@@ -75,6 +75,9 @@ async def _run_http(config_path: str) -> None:
     cache_cleanup_task: asyncio.Task[None] | None = None
     try:
         await gateway.warmup()
+        startup_summary = gateway.startup_summary()
+        logger.info("startup_summary", **startup_summary)
+        logger.pretty_startup_summary(startup_summary)
         if dsn:
             cache_cleanup_task = asyncio.create_task(_run_cache_cleanup_loop(store, logger))
         server = HttpServer(config, gateway, logger, telemetry)

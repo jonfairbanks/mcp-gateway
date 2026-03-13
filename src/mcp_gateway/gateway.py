@@ -382,6 +382,68 @@ class Gateway:
             "upstream_breakers": upstream_breakers,
         }
 
+    def _startup_failure_details(self, status: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+        if not status.get("initialize_success"):
+            return "initialize", self._error_message(status.get("initialize_error"))
+        if not status.get("tools_list_success"):
+            return "tools/list", self._error_message(status.get("tools_list_error"))
+        return None, None
+
+    def _error_message(self, error: Any) -> Optional[str]:
+        if isinstance(error, dict):
+            message = error.get("message")
+            data = error.get("data")
+            if isinstance(data, str) and data.strip():
+                if isinstance(message, str) and message.strip() and data.strip() != message.strip():
+                    return f"{message}: {data}"
+                return data.strip()
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+            return None
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+        return None
+
+    def startup_summary(self) -> Dict[str, Any]:
+        upstreams: list[Dict[str, Any]] = []
+        ready_upstream_count = 0
+        degraded_upstream_count = 0
+        failed_upstream_count = 0
+
+        for upstream in self._config.upstreams:
+            status = self._warmup_status.get(upstream.id, {})
+            initialize_success = bool(status.get("initialize_success"))
+            tools_list_success = bool(status.get("tools_list_success"))
+            if initialize_success and tools_list_success:
+                lifecycle_status = "ready"
+                ready_upstream_count += 1
+            elif initialize_success or tools_list_success:
+                lifecycle_status = "degraded"
+                degraded_upstream_count += 1
+            else:
+                lifecycle_status = "failed"
+                failed_upstream_count += 1
+
+            entry: Dict[str, Any] = {
+                "id": upstream.id,
+                "status": lifecycle_status,
+                "tool_count": int(status.get("tool_count", 0)),
+            }
+            stage, reason = self._startup_failure_details(status)
+            if stage:
+                entry["stage"] = stage
+            if reason:
+                entry["reason"] = reason
+            upstreams.append(entry)
+
+        return {
+            "gateway_ready": self.is_ready(),
+            "ready_upstream_count": ready_upstream_count,
+            "degraded_upstream_count": degraded_upstream_count,
+            "failed_upstream_count": failed_upstream_count,
+            "upstreams": upstreams,
+        }
+
     def is_ready(self) -> bool:
         return any(status.get("initialize_success") for status in self._warmup_status.values())
 
@@ -727,7 +789,9 @@ class Gateway:
             )
             self._warmup_status[upstream.id] = {
                 "initialize_success": init_success,
+                "initialize_error": init_error,
                 "tools_list_success": tools_list_success,
+                "tools_list_error": tools_list_error,
                 "tool_count": len(tool_names),
                 "tools": tool_names,
             }
