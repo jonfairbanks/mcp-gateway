@@ -11,6 +11,8 @@ from .postgres import PostgresStore
 from .server_http import HttpServer
 from .telemetry import GatewayTelemetry
 
+CACHE_CLEANUP_INTERVAL_SECONDS = 300.0
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mcp-gateway")
@@ -20,6 +22,21 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--config", required=True)
 
     return parser
+
+
+async def _run_cache_cleanup_loop(store: PostgresStore, logger: Logger) -> None:
+    try:
+        while True:
+            await asyncio.sleep(CACHE_CLEANUP_INTERVAL_SECONDS)
+            try:
+                deleted_rows = await store.cleanup_expired_cache()
+            except Exception as exc:  # noqa: BLE001
+                logger.warn("cache_cleanup_failed", error=str(exc))
+                continue
+            if deleted_rows > 0:
+                logger.info("cache_cleanup", deleted_rows=deleted_rows)
+    except asyncio.CancelledError:
+        pass
 
 
 async def _run_http(config_path: str) -> None:
@@ -36,11 +53,20 @@ async def _run_http(config_path: str) -> None:
     await store.start()
     telemetry = GatewayTelemetry()
     gateway = Gateway(config, store, logger, telemetry)
+    cache_cleanup_task: asyncio.Task[None] | None = None
     try:
         await gateway.warmup()
+        if dsn:
+            cache_cleanup_task = asyncio.create_task(_run_cache_cleanup_loop(store, logger))
         server = HttpServer(config, gateway, logger, telemetry)
         await server.run()
     finally:
+        if cache_cleanup_task:
+            cache_cleanup_task.cancel()
+            try:
+                await cache_cleanup_task
+            except asyncio.CancelledError:
+                pass
         await gateway.close()
         await telemetry.close()
         await store.close()

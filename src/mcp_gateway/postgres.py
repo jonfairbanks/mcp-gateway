@@ -148,3 +148,10 @@ class PostgresStore:
                     datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
                 ),
             )
+
+    async def cleanup_expired_cache(self) -> int:
+        if not self._pool:
+            return 0
+        async with self._pool.connection() as conn:
+            cur = await conn.execute("DELETE FROM mcp_cache WHERE expires_at < now()")
+            return max(0, cur.rowcount)
