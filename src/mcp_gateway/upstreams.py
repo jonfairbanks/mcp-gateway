@@ -34,12 +34,15 @@ class HTTPUpstream:
         self._session_id: Optional[str] = None
         self._protocol_version = "2024-11-05"
         self._session: Optional[aiohttp.ClientSession] = None
+        self._start_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
         if self._session is None:
-            timeout = aiohttp.ClientTimeout(total=self._timeout)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+            async with self._start_lock:
+                if self._session is None:
+                    timeout = aiohttp.ClientTimeout(total=self._timeout)
+                    self._session = aiohttp.ClientSession(timeout=timeout)
 
     async def close(self) -> None:
         if self._session:
