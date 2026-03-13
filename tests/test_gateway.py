@@ -132,6 +132,42 @@ def test_http_auth_header_parsing() -> None:
     assert server._authorize(request_bad) is not None
 
 
+def test_tools_handler_returns_browser_friendly_unauthorized_html() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    request = SimpleNamespace(
+        headers={"Accept": "text/html"},
+        remote="127.0.0.1",
+    )
+
+    response = asyncio.run(server.tools_handler(request))
+
+    assert response.status == 401
+    assert response.content_type == "text/html"
+    assert "&lt;gateway.api_key&gt;" in response.text
+    assert response.headers["WWW-Authenticate"] == 'Bearer realm="mcp-gateway"'
+
+
+def test_tools_handler_returns_clear_json_when_not_a_browser_request() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    request = SimpleNamespace(
+        headers={"Accept": "application/json"},
+        remote="127.0.0.1",
+    )
+
+    response = asyncio.run(server.tools_handler(request))
+
+    assert response.status == 401
+    assert response.content_type == "application/json"
+    assert b"Browsers do not send this header automatically" in response.body
+    assert response.headers["WWW-Authenticate"] == 'Bearer realm="mcp-gateway"'
+
+
 def test_client_id_ignores_untrusted_x_client_id() -> None:
     config = _config_with_upstreams([_upstream()])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())

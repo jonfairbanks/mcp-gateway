@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import time
 from typing import Any, Dict, Optional
@@ -61,8 +62,8 @@ class HttpServer:
                 "<html><head><title>401 Unauthorized</title></head>"
                 "<body>"
                 "<h1>401 Unauthorized</h1>"
-                f"<p>{message}</p>"
-                f"<p>{hint}</p>"
+                f"<p>{html.escape(message)}</p>"
+                f"<p>{html.escape(hint)}</p>"
                 "</body></html>"
             )
             return web.Response(text=body, status=401, content_type="text/html", headers=headers)
