@@ -104,7 +104,7 @@ def main() -> None:
         else:
             raise SystemExit(f"Unknown command: {args.command}")
     except KeyboardInterrupt:
-        raise SystemExit(130)
+        raise SystemExit(130) from None
 
 
 if __name__ == "__main__":
