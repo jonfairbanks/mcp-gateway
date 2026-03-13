@@ -16,6 +16,7 @@ upstreams:
 - `listen_host` default `0.0.0.0`
 - `listen_port` default `8080`
 - `api_key` bearer token required by gateway HTTP endpoints
+- `allow_unauthenticated` default `false`; when `true`, startup allows an empty `api_key` and logs a warning
 - `trusted_proxies` default `["127.0.0.1", "::1"]`
   - `X-Forwarded-For` and `X-Client-Id` headers are only trusted when `request.remote` is in this list.
 - `request_max_bytes` default `2097152` (2 MB)

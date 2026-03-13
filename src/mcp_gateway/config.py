@@ -11,6 +11,7 @@ class GatewayConfig:
     listen_host: str
     listen_port: int
     api_key: str
+    allow_unauthenticated: bool
     trusted_proxies: List[str]
     request_max_bytes: int
     rate_limit_per_minute: int
@@ -102,6 +103,7 @@ def load_config(path: str) -> AppConfig:
         listen_host=_get(gateway_raw, "listen_host", "0.0.0.0"),
         listen_port=int(_get(gateway_raw, "listen_port", 8080)),
         api_key=_get(gateway_raw, "api_key", ""),
+        allow_unauthenticated=bool(_get(gateway_raw, "allow_unauthenticated", False)),
         trusted_proxies=list(_get(gateway_raw, "trusted_proxies", ["127.0.0.1", "::1"])),
         request_max_bytes=int(_get(gateway_raw, "request_max_bytes", 2 * 1024 * 1024)),
         rate_limit_per_minute=int(_get(gateway_raw, "rate_limit_per_minute", 120)),

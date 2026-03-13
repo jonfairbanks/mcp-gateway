@@ -24,6 +24,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _validate_runtime_config(config, logger: Logger) -> None:
+    if config.gateway.api_key:
+        return
+    if config.gateway.allow_unauthenticated:
+        logger.warn(
+            "authentication_disabled",
+            reason="gateway.api_key not set",
+            explicit_opt_in=True,
+        )
+        return
+    logger.error(
+        "authentication_required",
+        reason="gateway.api_key not set",
+        suggestion="Set gateway.api_key or enable gateway.allow_unauthenticated",
+    )
+    raise SystemExit(2)
+
+
 async def _run_cache_cleanup_loop(store: PostgresStore, logger: Logger) -> None:
     try:
         while True:
@@ -42,6 +60,7 @@ async def _run_cache_cleanup_loop(store: PostgresStore, logger: Logger) -> None:
 async def _run_http(config_path: str) -> None:
     config = load_config(config_path)
     logger = Logger(stdout_json=config.logging.stdout_json)
+    _validate_runtime_config(config, logger)
     dsn = os.getenv("DATABASE_URL", "")
     if not dsn:
         logger.warn(
