@@ -88,6 +88,20 @@ class Gateway:
             return [self._redact_for_storage(item) for item in value]
         return value
 
+    def _duplicate_tool_message(self, duplicates: Dict[str, set[str]]) -> str:
+        details = ", ".join(
+            f"{tool_name} ({', '.join(sorted(upstream_ids))})"
+            for tool_name, upstream_ids in sorted(duplicates.items())
+        )
+        return f"Duplicate tool names detected across upstreams: {details}"
+
+    def _find_duplicate_tool_assignments(self, tool_sources: Dict[str, set[str]]) -> Dict[str, set[str]]:
+        return {
+            tool_name: upstream_ids
+            for tool_name, upstream_ids in tool_sources.items()
+            if len(upstream_ids) > 1
+        }
+
     async def _safe_log_request(
         self,
         request_id: UUID,
@@ -481,6 +495,7 @@ class Gateway:
             seen: set[str] = set()
             tools: list[Dict[str, Any]] = []
             registry: Dict[str, str] = {}
+            tool_sources: Dict[str, set[str]] = {}
             upstream_tools: Dict[str, list[str]] = {}
             for item in results:
                 upstream = item["upstream"]
@@ -491,6 +506,7 @@ class Gateway:
                         continue
                     if name not in upstream_tool_names:
                         upstream_tool_names.append(name)
+                    tool_sources.setdefault(name, set()).add(upstream.id)
                     # Keep full registry (including denied tools) so tools/call can
                     # be routed and then explicitly denied with a clear error message.
                     registry[name] = upstream.id
@@ -499,6 +515,11 @@ class Gateway:
                     seen.add(name)
                     tools.append(tool)
                 upstream_tools[upstream.id] = upstream_tool_names
+            duplicates = self._find_duplicate_tool_assignments(tool_sources)
+            if duplicates:
+                message = self._duplicate_tool_message(duplicates)
+                upstream_errors.append({"reason": "duplicate_tools", "duplicates": {k: sorted(v) for k, v in duplicates.items()}})
+                return make_error_response(payload.get("id"), -32003, message), False, upstream_errors
             merged["tools"] = tools
             async with self._registry_lock:
                 self._tool_registry = registry
@@ -628,6 +649,7 @@ class Gateway:
     async def warmup(self) -> None:
         # Prime upstream sessions and seed tool registry before client traffic.
         registry_updates: Dict[str, str] = {}
+        tool_sources: Dict[str, set[str]] = {}
         for upstream in self._config.upstreams:
             init_success = False
             tools_list_success = False
@@ -681,6 +703,7 @@ class Gateway:
                     tool_names = [t.get("name") for t in tools if isinstance(t, dict) and isinstance(t.get("name"), str)]
                     tools_list_success = True
                     for tool_name in tool_names:
+                        tool_sources.setdefault(tool_name, set()).add(upstream.id)
                         # Keep denied tools in the registry so tool invocations can be
                         # rejected by policy with an explicit deny response.
                         registry_updates[tool_name] = upstream.id
@@ -708,6 +731,10 @@ class Gateway:
                 "tool_count": len(tool_names),
                 "tools": tool_names,
             }
+
+        duplicates = self._find_duplicate_tool_assignments(tool_sources)
+        if duplicates:
+            raise RuntimeError(self._duplicate_tool_message(duplicates))
 
         if registry_updates:
             async with self._registry_lock:
