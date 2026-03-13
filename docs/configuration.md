@@ -27,6 +27,7 @@ upstreams:
 ## `logging`
 
 - `stdout_json` default `true`
+- `extra_redact_fields` default `[]`; additional case-insensitive payload keys redacted before request/response persistence
 
 ## `cache`
 
@@ -77,9 +78,11 @@ gateway:
   listen_host: "0.0.0.0"
   listen_port: 8080
   api_key: "change-me"
+  allow_unauthenticated: false
 
 logging:
   stdout_json: true
+  extra_redact_fields: []
 
 cache:
   enabled: true

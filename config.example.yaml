@@ -7,6 +7,7 @@ gateway:
 
 logging:
   stdout_json: true
+  extra_redact_fields: []
 
 cache:
   enabled: true

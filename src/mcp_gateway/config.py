@@ -22,6 +22,7 @@ class GatewayConfig:
 @dataclass
 class LoggingConfig:
     stdout_json: bool
+    extra_redact_fields: List[str]
 
 
 @dataclass
@@ -113,6 +114,7 @@ def load_config(path: str) -> AppConfig:
 
     logging_cfg = LoggingConfig(
         stdout_json=bool(_get(logging_raw, "stdout_json", True)),
+        extra_redact_fields=[str(field) for field in list(_get(logging_raw, "extra_redact_fields", []))],
     )
 
     cache_cfg = CacheConfig(

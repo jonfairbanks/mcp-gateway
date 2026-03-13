@@ -16,6 +16,21 @@ from .router import build_routes, select_upstream
 from .telemetry import GatewayTelemetry
 from .upstreams import HTTPUpstream, StdioUpstream, UpstreamResponse
 
+BUILTIN_REDACT_FIELDS = frozenset(
+    {
+        "authorization",
+        "x-api-key",
+        "api_key",
+        "apikey",
+        "token",
+        "access_token",
+        "refresh_token",
+        "password",
+        "secret",
+        "client_secret",
+    }
+)
+
 
 @dataclass
 class GatewayResult:
@@ -49,12 +64,29 @@ class Gateway:
         self._upstream_breakers: Dict[str, Dict[str, float]] = {}
         self._global_breaker: Dict[str, float] = {"consecutive_failures": 0, "open_until": 0.0}
         self._warmup_status: Dict[str, Dict[str, Any]] = {}
+        self._redact_fields = BUILTIN_REDACT_FIELDS | {
+            field.strip().lower() for field in config.logging.extra_redact_fields if field.strip()
+        }
 
     async def close(self) -> None:
         for client in self._http_upstreams.values():
             await client.close()
         for client in self._stdio_upstreams.values():
             await client.close()
+
+    def _redact_for_storage(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            redacted: Dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key).strip().lower()
+                if normalized_key in self._redact_fields:
+                    redacted[key] = "[REDACTED]"
+                else:
+                    redacted[key] = self._redact_for_storage(item)
+            return redacted
+        if isinstance(value, list):
+            return [self._redact_for_storage(item) for item in value]
+        return value
 
     async def _safe_log_request(
         self,
@@ -67,12 +99,14 @@ class Gateway:
         client_id: Optional[str],
         cache_key: Optional[str],
     ) -> None:
+        redacted_params = self._redact_for_storage(params) if params is not None else None
+        redacted_raw_request = self._redact_for_storage(raw_request)
         try:
             await self._store.log_request(
                 request_id=request_id,
                 method=method,
-                params=params,
-                raw_request=raw_request,
+                params=redacted_params,
+                raw_request=redacted_raw_request,
                 upstream_id=upstream_id,
                 tool_name=tool_name,
                 client_id=client_id,
@@ -98,6 +132,7 @@ class Gateway:
         cache_hit: bool,
         response: Dict[str, Any],
     ) -> None:
+        redacted_response = self._redact_for_storage(response)
         try:
             await self._store.log_response(
                 response_id=response_id,
@@ -105,7 +140,7 @@ class Gateway:
                 success=success,
                 latency_ms=latency_ms,
                 cache_hit=cache_hit,
-                response=response,
+                response=redacted_response,
             )
         except Exception as exc:  # noqa: BLE001
             self._logger.warn(

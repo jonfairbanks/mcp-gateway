@@ -46,6 +46,7 @@ For `stdio` upstreams, prefer `command` + `args`:
 ## Client Setup
 
 Point your MCP client to `/mcp` and include bearer auth.
+By default the gateway refuses to start without `gateway.api_key`; set `gateway.allow_unauthenticated: true` only when you intentionally want an open deployment.
 
 #### Codex example:
 
