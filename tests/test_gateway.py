@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 import asyncio
+import json
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -117,6 +119,43 @@ def test_cache_key_normalization() -> None:
     params_b = {"a": 1, "b": 2}
     key_a = gateway._cache_key(upstream, "tools/call", "notion.get", params_a, None)
     key_b = gateway._cache_key(upstream, "tools/call", "notion.get", params_b, None)
+    assert key_a == key_b
+
+
+def test_cache_key_ignores_progress_token_metadata() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    upstream = config.upstreams[0]
+    params_a = {
+        "name": "query-docs",
+        "arguments": {"libraryId": "/fastapi/fastapi", "query": "hello"},
+        "_meta": {"progressToken": 1},
+    }
+    params_b = {
+        "_meta": {"progressToken": 2},
+        "arguments": {"query": "hello", "libraryId": "/fastapi/fastapi"},
+        "name": "query-docs",
+    }
+    key_a = gateway._cache_key(upstream, "tools/call", "query-docs", params_a, None)
+    key_b = gateway._cache_key(upstream, "tools/call", "query-docs", params_b, None)
+    assert key_a == key_b
+
+
+def test_cache_key_treats_progress_token_only_meta_as_absent() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    upstream = config.upstreams[0]
+    params_a = {
+        "name": "query-docs",
+        "arguments": {"libraryId": "/fastapi/fastapi", "query": "hello"},
+        "_meta": {"progressToken": 7},
+    }
+    params_b = {
+        "name": "query-docs",
+        "arguments": {"libraryId": "/fastapi/fastapi", "query": "hello"},
+    }
+    key_a = gateway._cache_key(upstream, "tools/call", "query-docs", params_a, None)
+    key_b = gateway._cache_key(upstream, "tools/call", "query-docs", params_b, None)
     assert key_a == key_b
 
 
@@ -244,6 +283,109 @@ def test_redacts_sensitive_request_and_response_fields_before_storage() -> None:
     assert store.response_args["response"]["error"]["data"]["value"] == 1
 
 
+def test_execute_upstream_operation_returns_successful_request_payload() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    upstream = config.upstreams[0]
+
+    async def fake_call(upstream_cfg, payload):
+        assert upstream_cfg.id == upstream.id
+        assert payload["method"] == "tools/call"
+        return UpstreamResponse(
+            payload={"jsonrpc": "2.0", "id": payload.get("id"), "result": {"ok": True}},
+            success=True,
+        )
+
+    gateway._call_upstream = fake_call  # type: ignore[method-assign]
+
+    execution = asyncio.run(
+        gateway._execute_upstream_operation(
+            upstream,
+            "tools/call",
+            {"jsonrpc": "2.0", "id": "1", "method": "tools/call", "params": {}},
+        )
+    )
+
+    assert execution.success is True
+    assert execution.payload["result"] == {"ok": True}
+    assert execution.log_payload == execution.payload
+    assert execution.error is None
+
+
+def test_execute_upstream_operation_maps_notification_failures() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    upstream = config.upstreams[0]
+
+    async def fake_notify(upstream_cfg, payload) -> None:
+        assert upstream_cfg.id == upstream.id
+        assert payload["method"] == "notifications/test"
+        raise RuntimeError("broken upstream")
+
+    gateway._notify_upstream = fake_notify  # type: ignore[method-assign]
+
+    execution = asyncio.run(
+        gateway._execute_upstream_operation(
+            upstream,
+            "notifications/test",
+            {"jsonrpc": "2.0", "method": "notifications/test", "params": {}},
+            notification=True,
+        )
+    )
+
+    assert execution.success is False
+    assert execution.payload == {"accepted": False}
+    assert execution.log_payload["accepted"] is False
+    assert execution.error == {"code": -32004, "message": "broken upstream"}
+
+
+def test_warmup_and_tools_list_build_identical_tool_registry_state() -> None:
+    config = _config_with_upstreams([_upstream("one"), _upstream("two")])
+    warmup_gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    list_gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    tool_payloads = {
+        "one": [{"name": "alpha.tool"}, {"name": "alpha.tool"}],
+        "two": [{"name": "beta.tool"}],
+    }
+
+    async def fake_call(upstream, payload):
+        if payload["method"] == "initialize":
+            return UpstreamResponse(payload={"jsonrpc": "2.0", "id": payload.get("id"), "result": {}}, success=True)
+        if payload["method"] == "tools/list":
+            return UpstreamResponse(
+                payload={
+                    "jsonrpc": "2.0",
+                    "id": payload.get("id"),
+                    "result": {"tools": tool_payloads[upstream.id]},
+                },
+                success=True,
+            )
+        raise AssertionError(payload["method"])
+
+    async def fake_notify(upstream, payload) -> None:
+        return None
+
+    for gateway in (warmup_gateway, list_gateway):
+        gateway._call_upstream = fake_call  # type: ignore[method-assign]
+        gateway._notify_upstream = fake_notify  # type: ignore[method-assign]
+
+    asyncio.run(warmup_gateway.warmup())
+    asyncio.run(
+        list_gateway.handle(
+            {"jsonrpc": "2.0", "id": "1", "method": "tools/list", "params": {}},
+            client_id=None,
+        )
+    )
+
+    expected_registry = {"alpha.tool": "one", "beta.tool": "two"}
+    expected_upstream_tools = {"one": ["alpha.tool"], "two": ["beta.tool"]}
+    assert warmup_gateway._tool_registry == expected_registry
+    assert list_gateway._tool_registry == expected_registry
+    assert warmup_gateway._upstream_tools == expected_upstream_tools
+    assert list_gateway._upstream_tools == expected_upstream_tools
+    assert warmup_gateway._tool_alias_registry == list_gateway._tool_alias_registry
+
+
 def test_warmup_fails_on_duplicate_tool_names() -> None:
     config = _config_with_upstreams([_upstream("one"), _upstream("two")])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
@@ -335,6 +477,51 @@ def test_enqueue_session_payload_closes_session_when_queue_is_full() -> None:
     assert enqueued is False
     assert "session-1" not in server._sessions
     assert session.closed is True
+
+
+def test_preflight_request_rejects_unauthorized_requests() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    request = SimpleNamespace(headers={}, remote="127.0.0.1")
+
+    response = asyncio.run(server._preflight_request(request))
+
+    assert response is not None
+    assert response.status == 401
+
+
+def test_preflight_request_rejects_rate_limited_requests() -> None:
+    config = _config_with_upstreams([_upstream()])
+    config.gateway.rate_limit_per_minute = 1
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    request = SimpleNamespace(headers={"Authorization": "Bearer secret"}, remote="127.0.0.1")
+
+    assert asyncio.run(server._preflight_request(request)) is None
+    response = asyncio.run(server._preflight_request(request))
+
+    assert response is not None
+    assert response.status == 429
+
+
+def test_parse_json_request_rejects_invalid_json() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def bad_json():
+        raise json.JSONDecodeError("bad", "{}", 0)
+
+    request = SimpleNamespace(json=bad_json)
+
+    payload, response = asyncio.run(server._parse_json_request(request))
+
+    assert payload is None
+    assert response is not None
+    assert response.status == 400
 
 
 def test_sse_handler_rejects_when_session_capacity_is_exceeded() -> None:
