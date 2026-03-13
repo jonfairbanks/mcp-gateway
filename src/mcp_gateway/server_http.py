@@ -47,6 +47,35 @@ class HttpServer:
                 return None
         return web.json_response(make_error_response(None, -32010, "Unauthorized"), status=401)
 
+    def _authorize_http_endpoint(self, request: web.Request, endpoint: str) -> Optional[web.Response]:
+        unauthorized = self._authorize(request)
+        if not unauthorized:
+            return None
+        headers = {"WWW-Authenticate": 'Bearer realm="mcp-gateway"'}
+        message = f"{endpoint} requires Authorization: Bearer <gateway.api_key>."
+        hint = "Browsers do not send this header automatically. Use curl or an API client."
+        accept = request.headers.get("Accept", "")
+        if "text/html" in accept.lower():
+            body = (
+                "<!doctype html>"
+                "<html><head><title>401 Unauthorized</title></head>"
+                "<body>"
+                "<h1>401 Unauthorized</h1>"
+                f"<p>{message}</p>"
+                f"<p>{hint}</p>"
+                "</body></html>"
+            )
+            return web.Response(text=body, status=401, content_type="text/html", headers=headers)
+        return web.json_response(
+            {
+                "error": "Unauthorized",
+                "message": message,
+                "hint": hint,
+            },
+            status=401,
+            headers=headers,
+        )
+
     def _trusted_proxy(self, request: web.Request) -> bool:
         trusted = set(self._config.gateway.trusted_proxies)
         remote = request.remote or ""
@@ -134,7 +163,7 @@ class HttpServer:
         return web.json_response({"ready": ready, **self._gateway.status_snapshot()}, status=status)
 
     async def tools_handler(self, request: web.Request) -> web.Response:
-        unauthorized = self._authorize(request)
+        unauthorized = self._authorize_http_endpoint(request, "/tools")
         if unauthorized:
             return unauthorized
         rate_limited = await self._rate_limit(request)
