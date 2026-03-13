@@ -109,4 +109,6 @@ Default local endpoints:
 
 ## License
 
-MIT (see [`pyproject.toml`](pyproject.toml)).
+Apache-2.0 (see [`LICENSE`](LICENSE)).
+
+Contributions submitted to this repository are accepted under the repository's Apache-2.0 license unless explicitly stated otherwise.
