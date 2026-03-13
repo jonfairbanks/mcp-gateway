@@ -6,6 +6,11 @@ It is designed for shared deployments with policy controls, caching, and observa
 
 ![MCP Gateway Architecture](docs/mcp-gateway-architecture.png)
 
+![MCP Gateway Runtime Flow](docs/mcp-gateway-runtime-flow.png)
+
+Discovery requests such as `initialize` and `tools/list` fan out across upstream MCPs and the gateway merges the results.
+`tools/call` requests route to one selected upstream, then the gateway applies caching, logging, and policy checks before returning the response.
+
 ## Key Features
 
 - Multi-upstream routing (`stdio` and HTTP upstreams).
