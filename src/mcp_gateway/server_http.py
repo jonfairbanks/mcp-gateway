@@ -16,9 +16,9 @@ from .telemetry import GatewayTelemetry
 
 
 class SseSession:
-    def __init__(self, response: web.StreamResponse) -> None:
+    def __init__(self, response: web.StreamResponse, max_messages: int) -> None:
         self.response = response
-        self.queue: asyncio.Queue[str] = asyncio.Queue()
+        self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=max_messages)
         self.closed = False
 
 
@@ -99,6 +99,32 @@ class HttpServer:
             headers={"Retry-After": str(retry_after)},
         )
 
+    def _session_capacity_exceeded(self) -> bool:
+        return len(self._sessions) >= max(1, self._config.gateway.max_sse_sessions)
+
+    async def _close_session(self, session_id: str) -> None:
+        session = self._sessions.pop(session_id, None)
+        if not session:
+            return
+        session.closed = True
+        try:
+            await session.response.write_eof()
+        except RuntimeError:
+            pass
+        except ConnectionResetError:
+            pass
+
+    async def _enqueue_session_payload(self, session_id: str, data: str) -> bool:
+        session = self._sessions.get(session_id)
+        if not session or session.closed:
+            return False
+        try:
+            session.queue.put_nowait(data)
+            return True
+        except asyncio.QueueFull:
+            await self._close_session(session_id)
+            return False
+
     async def health_handler(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "service": "mcp-gateway", **self._gateway.status_snapshot()})
 
@@ -128,6 +154,16 @@ class HttpServer:
         rate_limited = await self._rate_limit(request)
         if rate_limited:
             return rate_limited
+        if self._session_capacity_exceeded():
+            return web.json_response(
+                make_error_response(
+                    None,
+                    -32031,
+                    "SSE session capacity exceeded",
+                    data={"category": "capacity_exhausted", "retryable": True},
+                ),
+                status=503,
+            )
 
         response = web.StreamResponse(
             status=200,
@@ -140,7 +176,7 @@ class HttpServer:
         )
         await response.prepare(request)
         session_id = str(uuid4())
-        session = SseSession(response)
+        session = SseSession(response, max(1, self._config.gateway.sse_queue_max_messages))
         self._sessions[session_id] = session
 
         await response.write(f"event: ready\ndata: {session_id}\n\n".encode("utf-8"))
@@ -154,8 +190,7 @@ class HttpServer:
         except asyncio.CancelledError:
             pass
         finally:
-            session.closed = True
-            self._sessions.pop(session_id, None)
+            await self._close_session(session_id)
 
         return response
 
@@ -178,8 +213,17 @@ class HttpServer:
         if payload.get("id") is None:
             return web.Response(status=202)
         if session_id and session_id in self._sessions:
-            session = self._sessions[session_id]
-            await session.queue.put(json_dumps(result.payload))
+            enqueued = await self._enqueue_session_payload(session_id, json_dumps(result.payload))
+            if not enqueued:
+                return web.json_response(
+                    make_error_response(
+                        payload.get("id"),
+                        -32030,
+                        "SSE session backpressure",
+                        data={"category": "session_backpressure", "retryable": True, "session_id": session_id},
+                    ),
+                    status=503,
+                )
             return web.json_response({"status": "queued", "session_id": session_id})
 
         return web.json_response(result.payload)

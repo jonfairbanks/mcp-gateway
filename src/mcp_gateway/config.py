@@ -17,6 +17,8 @@ class GatewayConfig:
     rate_limit_per_minute: int
     circuit_breaker_fail_threshold: int
     circuit_breaker_open_seconds: int
+    sse_queue_max_messages: int
+    max_sse_sessions: int
 
 
 @dataclass
@@ -110,6 +112,8 @@ def load_config(path: str) -> AppConfig:
         rate_limit_per_minute=int(_get(gateway_raw, "rate_limit_per_minute", 120)),
         circuit_breaker_fail_threshold=int(_get(gateway_raw, "circuit_breaker_fail_threshold", 20)),
         circuit_breaker_open_seconds=int(_get(gateway_raw, "circuit_breaker_open_seconds", 30)),
+        sse_queue_max_messages=int(_get(gateway_raw, "sse_queue_max_messages", 100)),
+        max_sse_sessions=int(_get(gateway_raw, "max_sse_sessions", 1000)),
     )
 
     logging_cfg = LoggingConfig(

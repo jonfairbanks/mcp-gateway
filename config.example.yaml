@@ -4,6 +4,8 @@ gateway:
   api_key: "change-me"
   allow_unauthenticated: false
   rate_limit_per_minute: 120
+  sse_queue_max_messages: 100
+  max_sse_sessions: 1000
 
 logging:
   stdout_json: true

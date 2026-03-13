@@ -23,6 +23,8 @@ upstreams:
 - `rate_limit_per_minute` default `120`
 - `circuit_breaker_fail_threshold` default `20`
 - `circuit_breaker_open_seconds` default `30`
+- `sse_queue_max_messages` default `100`
+- `max_sse_sessions` default `1000`
 
 ## `logging`
 
@@ -79,6 +81,8 @@ gateway:
   listen_port: 8080
   api_key: "change-me"
   allow_unauthenticated: false
+  sse_queue_max_messages: 100
+  max_sse_sessions: 1000
 
 logging:
   stdout_json: true
