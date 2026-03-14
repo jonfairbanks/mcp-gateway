@@ -52,6 +52,7 @@ def _config_with_upstreams(upstreams: list[UpstreamConfig]) -> AppConfig:
             listen_port=8080,
             api_key="secret",
             allow_unauthenticated=False,
+            public_tools_catalog=False,
             trusted_proxies=["127.0.0.1", "::1"],
             request_max_bytes=2 * 1024 * 1024,
             rate_limit_per_minute=120,
@@ -205,6 +206,44 @@ def test_tools_handler_returns_clear_json_when_not_a_browser_request() -> None:
     assert response.content_type == "application/json"
     assert b"Browsers do not send this header automatically" in response.body
     assert response.headers["WWW-Authenticate"] == 'Bearer realm="mcp-gateway"'
+
+
+def test_tools_handler_can_be_public_without_auth() -> None:
+    config = _config_with_upstreams([_upstream()])
+    config.gateway.public_tools_catalog = True
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    request = SimpleNamespace(
+        headers={"Accept": "application/json"},
+        remote="127.0.0.1",
+    )
+
+    response = asyncio.run(server.tools_handler(request))
+
+    assert response.status == 200
+    payload = json.loads(response.body.decode("utf-8"))
+    assert "upstreams" in payload
+    assert "tools" not in payload["upstreams"][0]
+
+
+def test_public_tools_handler_still_applies_rate_limits() -> None:
+    config = _config_with_upstreams([_upstream()])
+    config.gateway.public_tools_catalog = True
+    config.gateway.rate_limit_per_minute = 1
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    request = SimpleNamespace(
+        headers={"Accept": "application/json"},
+        remote="127.0.0.1",
+    )
+
+    first = asyncio.run(server.tools_handler(request))
+    second = asyncio.run(server.tools_handler(request))
+
+    assert first.status == 200
+    assert second.status == 429
 
 
 def test_client_id_ignores_untrusted_x_client_id() -> None:
@@ -539,6 +578,20 @@ def test_enqueue_session_payload_closes_session_when_queue_is_full() -> None:
 
 def test_preflight_request_rejects_unauthorized_requests() -> None:
     config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    request = SimpleNamespace(headers={}, remote="127.0.0.1")
+
+    response = asyncio.run(server._preflight_request(request))
+
+    assert response is not None
+    assert response.status == 401
+
+
+def test_execution_endpoints_still_require_auth_when_tools_catalog_is_public() -> None:
+    config = _config_with_upstreams([_upstream()])
+    config.gateway.public_tools_catalog = True
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
     server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
 

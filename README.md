@@ -59,6 +59,7 @@ For `stdio` upstreams, prefer `command` + `args`:
 
 Point your MCP client to `/mcp` and include bearer auth.
 By default the gateway refuses to start without `gateway.api_key`; set `gateway.allow_unauthenticated: true` only when you intentionally want an open deployment.
+Set `gateway.public_tools_catalog: true` only if you want `GET /tools` to be browsable without auth; execution endpoints remain protected.
 
 #### Codex example:
 
@@ -86,7 +87,7 @@ http_headers = { "Authorization" = "Bearer change-me" }
 ## Endpoints
 
 - `POST /mcp` JSON-RPC MCP endpoint.
-- `GET /tools` upstream tool catalog (`tools`, `exposed_tools`, `deny_tools`).
+- `GET /tools` upstream tool catalog (`exposed_tools`, `deny_tools`); optionally public when `gateway.public_tools_catalog: true`.
 - `GET /metrics` Prometheus/OpenMetrics metrics.
 - `GET /healthz` liveness + warmup/breaker status.
 - `GET /readyz` readiness (`503` until at least one upstream initializes).

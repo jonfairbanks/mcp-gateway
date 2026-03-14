@@ -22,6 +22,7 @@ String values support explicit env interpolation:
 - `listen_port` default `8080`
 - `api_key` bearer token required by gateway HTTP endpoints
 - `allow_unauthenticated` default `false`; when `true`, startup allows an empty `api_key` and logs a warning
+- `public_tools_catalog` default `false`; when `true`, `GET /tools` skips auth but still uses rate limiting
 - `trusted_proxies` default `["127.0.0.1", "::1"]`
   - `X-Forwarded-For` and `X-Client-Id` headers are only trusted when `request.remote` is in this list.
 - `request_max_bytes` default `2097152` (2 MB)
@@ -86,6 +87,7 @@ gateway:
   listen_port: 8080
   api_key: "${MCP_GATEWAY_API_KEY:-change-me}"
   allow_unauthenticated: false
+  public_tools_catalog: false
   sse_queue_max_messages: 100
   max_sse_sessions: 1000
 

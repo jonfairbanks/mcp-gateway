@@ -587,7 +587,6 @@ class Gateway:
                     "id": upstream.id,
                     "name": upstream.name,
                     "tool_count": len(discovered),
-                    "tools": discovered,
                     "exposed_tool_count": len(exposed),
                     "exposed_tools": exposed,
                     "deny_tools": list(upstream.deny_tools),

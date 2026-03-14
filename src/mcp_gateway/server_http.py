@@ -155,13 +155,20 @@ class HttpServer:
             await self._close_session(session_id)
             return False
 
-    async def _preflight_request(self, request: web.Request, endpoint: Optional[str] = None) -> Optional[web.Response]:
-        if endpoint:
-            unauthorized = self._authorize_http_endpoint(request, endpoint)
-        else:
-            unauthorized = self._authorize(request)
-        if unauthorized:
-            return unauthorized
+    async def _preflight_request(
+        self,
+        request: web.Request,
+        endpoint: Optional[str] = None,
+        *,
+        require_auth: bool = True,
+    ) -> Optional[web.Response]:
+        if require_auth:
+            if endpoint:
+                unauthorized = self._authorize_http_endpoint(request, endpoint)
+            else:
+                unauthorized = self._authorize(request)
+            if unauthorized:
+                return unauthorized
         return await self._rate_limit(request)
 
     async def _parse_json_request(self, request: web.Request) -> tuple[Optional[Dict[str, Any]], Optional[web.Response]]:
@@ -194,7 +201,13 @@ class HttpServer:
         return web.json_response({"ready": ready, **self._gateway.status_snapshot()}, status=status)
 
     async def tools_handler(self, request: web.Request) -> web.Response:
-        blocked = await self._preflight_request(request, endpoint="/tools")
+        # The tool catalog may be intentionally public for discovery, but the
+        # execution endpoints still go through the authenticated preflight path.
+        blocked = await self._preflight_request(
+            request,
+            endpoint="/tools",
+            require_auth=not self._config.gateway.public_tools_catalog,
+        )
         if blocked:
             return blocked
         payload = await self._gateway.tools_catalog()

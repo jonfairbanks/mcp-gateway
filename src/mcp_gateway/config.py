@@ -16,6 +16,7 @@ class GatewayConfig:
     listen_port: int
     api_key: str
     allow_unauthenticated: bool
+    public_tools_catalog: bool
     trusted_proxies: List[str]
     request_max_bytes: int
     rate_limit_per_minute: int
@@ -31,6 +32,7 @@ class GatewayConfig:
             listen_port=int(_get(data, "listen_port", 8080)),
             api_key=_get(data, "api_key", ""),
             allow_unauthenticated=bool(_get(data, "allow_unauthenticated", False)),
+            public_tools_catalog=bool(_get(data, "public_tools_catalog", False)),
             trusted_proxies=[str(proxy) for proxy in list(_get(data, "trusted_proxies", ["127.0.0.1", "::1"]))],
             request_max_bytes=int(_get(data, "request_max_bytes", 2 * 1024 * 1024)),
             rate_limit_per_minute=int(_get(data, "rate_limit_per_minute", 120)),

@@ -3,6 +3,7 @@ gateway:
   listen_port: 8080
   api_key: "${MCP_GATEWAY_API_KEY:-change-me}"
   allow_unauthenticated: false
+  public_tools_catalog: false
   rate_limit_per_minute: 120
   sse_queue_max_messages: 100
   max_sse_sessions: 1000
