@@ -33,6 +33,8 @@ psql "$DATABASE_URL" -f schema.sql
 
 ```bash
 pip install .
+export MCP_GATEWAY_API_KEY='change-me'
+export NOTION_TOKEN='ntn_***'
 DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway' \
   mcp-gateway serve --config /path/to/config.yaml
 ```
@@ -45,8 +47,13 @@ For `stdio` upstreams, prefer `command` + `args`:
   command: "npx"
   args: ["-y", "@notionhq/notion-mcp-server"]
   env:
-    NOTION_TOKEN: "ntn_***"
+    NOTION_TOKEN: "${NOTION_TOKEN}"
 ```
+
+`config.yaml` supports explicit env refs for string values:
+
+- `${NAME}` requires the environment variable to be set.
+- `${NAME:-default}` uses `default` when the variable is unset or empty.
 
 ## Client Setup
 

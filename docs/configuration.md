@@ -11,6 +11,11 @@ cache:
 upstreams:
 ```
 
+String values support explicit env interpolation:
+
+- `${NAME}` requires the environment variable to be set
+- `${NAME:-default}` uses `default` when the variable is unset or empty
+
 ## `gateway`
 
 - `listen_host` default `0.0.0.0`
@@ -79,7 +84,7 @@ Common:
 gateway:
   listen_host: "0.0.0.0"
   listen_port: 8080
-  api_key: "change-me"
+  api_key: "${MCP_GATEWAY_API_KEY:-change-me}"
   allow_unauthenticated: false
   sse_queue_max_messages: 100
   max_sse_sessions: 1000

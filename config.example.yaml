@@ -1,7 +1,7 @@
 gateway:
   listen_host: "0.0.0.0"
   listen_port: 8080
-  api_key: "change-me"
+  api_key: "${MCP_GATEWAY_API_KEY:-change-me}"
   allow_unauthenticated: false
   rate_limit_per_minute: 120
   sse_queue_max_messages: 100
@@ -65,7 +65,7 @@ upstreams:
       - "-y"
       - "@notionhq/notion-mcp-server"
     env:
-      NOTION_TOKEN: "ntn_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      NOTION_TOKEN: "${NOTION_TOKEN:-ntn_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}"
     deny_tools:
       - "API-post-page"
       - "API-patch-page"

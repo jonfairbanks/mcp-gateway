@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import yaml
+
+ENV_REF_PATTERN = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}")
 
 
 @dataclass
@@ -164,7 +168,32 @@ def _normalize_stdio_command(item: Dict[str, Any]) -> Optional[List[str]]:
     return command
 
 
+def _expand_env_string(value: str, path: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        name = match.group("name")
+        default = match.group("default")
+        env_value = os.getenv(name)
+        if default is not None:
+            return env_value if env_value not in (None, "") else default
+        if env_value is None:
+            raise ValueError(f"Missing required environment variable '{name}' for config value '{path}'")
+        return env_value
+
+    return ENV_REF_PATTERN.sub(replace, value)
+
+
+def _expand_env_refs(value: Any, path: str = "config") -> Any:
+    if isinstance(value, dict):
+        return {key: _expand_env_refs(item, f"{path}.{key}") for key, item in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_refs(item, f"{path}[{index}]") for index, item in enumerate(value)]
+    if isinstance(value, str):
+        # Only expand explicit ${...} markers so ordinary strings remain literal.
+        return _expand_env_string(value, path)
+    return value
+
+
 def load_config(path: str) -> AppConfig:
     with open(path, "r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
-    return AppConfig.from_dict(raw)
+    return AppConfig.from_dict(_expand_env_refs(raw))

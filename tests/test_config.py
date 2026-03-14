@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from mcp_gateway.config import load_config
 
 
@@ -66,3 +68,66 @@ upstreams:
     config = load_config(str(config_file))
     assert config.gateway.allow_unauthenticated is True
     assert config.logging.extra_redact_fields == ["custom_secret"]
+
+
+def test_load_config_expands_required_env_refs(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MCP_GATEWAY_API_KEY", "env-secret")
+    monkeypatch.setenv("NOTION_TOKEN", "ntn_env_token")
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "${MCP_GATEWAY_API_KEY}"
+upstreams:
+  - id: "notion"
+    transport: "stdio"
+    command: "npx"
+    args:
+      - "-y"
+      - "@notionhq/notion-mcp-server"
+    env:
+      NOTION_TOKEN: "${NOTION_TOKEN}"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(str(config_file))
+    assert config.gateway.api_key == "env-secret"
+    assert config.upstreams[0].env["NOTION_TOKEN"] == "ntn_env_token"
+
+
+def test_load_config_uses_default_for_missing_or_empty_env_refs(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("MCP_GATEWAY_API_KEY", raising=False)
+    monkeypatch.setenv("UPSTREAM_CWD", "")
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "${MCP_GATEWAY_API_KEY:-fallback-secret}"
+upstreams:
+  - id: "remote"
+    transport: "stdio"
+    command: "npx"
+    cwd: "${UPSTREAM_CWD:-/tmp/mcp-gateway}"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(str(config_file))
+    assert config.gateway.api_key == "fallback-secret"
+    assert config.upstreams[0].cwd == "/tmp/mcp-gateway"
+
+
+def test_load_config_rejects_missing_required_env_refs(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("MCP_GATEWAY_API_KEY", raising=False)
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "${MCP_GATEWAY_API_KEY}"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="MCP_GATEWAY_API_KEY"):
+        load_config(str(config_file))
