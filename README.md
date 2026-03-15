@@ -60,6 +60,30 @@ For `stdio` upstreams, prefer `command` + `args`:
 Point your MCP client to `/mcp` and include bearer auth.
 By default the gateway refuses to start without `gateway.api_key`; set `gateway.allow_unauthenticated: true` only when you intentionally want an open deployment.
 Set `gateway.public_tools_catalog: true` only if you want `GET /tools` to be browsable without auth; execution endpoints remain protected.
+For multi-user auth, set `gateway.auth_mode: "postgres_api_keys"`, keep `DATABASE_URL` set, and optionally configure `gateway.bootstrap_admin_api_key` for break-glass admin access.
+
+To seed the first database-backed user key:
+
+```bash
+DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway' \
+  mcp-gateway create-api-key \
+  --config /path/to/config.yaml \
+  --subject alice \
+  --display-name "Alice" \
+  --role member \
+  --key-name default
+```
+
+Once you have an admin key, the gateway also exposes JSON management APIs:
+
+- `GET /v1/me`
+- `GET /v1/me/api-keys`
+- `POST /v1/me/api-keys`
+- `DELETE /v1/me/api-keys/{key_id}`
+- `GET /v1/admin/users`
+- `POST /v1/admin/users`
+- `PATCH /v1/admin/users/{user_id}`
+- `GET /v1/admin/usage`
 
 #### Codex example:
 
@@ -86,12 +110,21 @@ http_headers = { "Authorization" = "Bearer change-me" }
 
 ## Endpoints
 
-- `POST /mcp` JSON-RPC MCP endpoint.
-- `GET /tools` upstream tool catalog (`exposed_tools`, `deny_tools`); optionally public when `gateway.public_tools_catalog: true`.
-- `GET /metrics` Prometheus/OpenMetrics metrics.
-- `GET /healthz` liveness + warmup/breaker status.
-- `GET /readyz` readiness (`503` until at least one upstream initializes).
-- `GET /sse` and `POST /message` for streamable MCP sessions.
+- `POST /mcp` main JSON-RPC MCP endpoint for `initialize`, discovery requests, and `tools/call`.
+- `GET /tools` lightweight HTTP tool catalog showing exposed and denied tools across upstreams; optionally public when `gateway.public_tools_catalog: true`.
+- `GET /metrics` Prometheus/OpenMetrics scrape endpoint for gateway and upstream counters.
+- `GET /healthz` liveness endpoint with gateway status and warmup/circuit-breaker snapshot.
+- `GET /readyz` readiness endpoint; returns `503` until at least one upstream is initialized and usable.
+- `GET /sse` opens a streamable MCP server-sent events session for clients using the SSE/message transport.
+- `POST /message` sends JSON-RPC messages to an active `/sse` session or executes them directly when no session is supplied.
+- `GET /v1/me` returns the authenticated principal, role, auth scheme, and linked user metadata.
+- `GET /v1/me/api-keys` lists the caller’s API keys and metadata without returning plaintext secrets.
+- `POST /v1/me/api-keys` creates a new API key for the authenticated user and returns the plaintext key once.
+- `DELETE /v1/me/api-keys/{key_id}` revokes one of the authenticated user’s API keys.
+- `GET /v1/admin/users` lists all managed users with roles and active status; admin only.
+- `POST /v1/admin/users` creates a managed user and can optionally issue an initial API key; admin only.
+- `PATCH /v1/admin/users/{user_id}` updates a user’s display name, role, or active status; admin only.
+- `GET /v1/admin/usage` returns aggregated request and key usage statistics grouped by user or API key; admin only.
 
 ## Docker
 
@@ -114,6 +147,7 @@ Default local endpoints:
 - If tools are missing, check `upstream_warmup` and `tools/list` logs.
 - If a tool call is blocked, look for JSON-RPC `-32001` with `error.data.category = policy_denied`.
 - If auth fails, verify `Authorization: Bearer <api_key>` matches `gateway.api_key`.
+- If key management endpoints return `400 Unavailable`, verify `gateway.auth_mode` is `postgres_api_keys`.
 
 ## License
 

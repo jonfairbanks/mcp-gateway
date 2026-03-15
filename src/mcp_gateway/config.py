@@ -14,7 +14,9 @@ ENV_REF_PATTERN = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<defa
 class GatewayConfig:
     listen_host: str
     listen_port: int
+    auth_mode: str
     api_key: str
+    bootstrap_admin_api_key: str
     allow_unauthenticated: bool
     public_tools_catalog: bool
     trusted_proxies: List[str]
@@ -27,10 +29,15 @@ class GatewayConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
+        auth_mode = str(_get(data, "auth_mode", "single_shared"))
+        if auth_mode not in {"single_shared", "postgres_api_keys"}:
+            raise ValueError("gateway.auth_mode must be 'single_shared' or 'postgres_api_keys'")
         return cls(
             listen_host=_get(data, "listen_host", "0.0.0.0"),
             listen_port=int(_get(data, "listen_port", 8080)),
+            auth_mode=auth_mode,
             api_key=_get(data, "api_key", ""),
+            bootstrap_admin_api_key=_get(data, "bootstrap_admin_api_key", ""),
             allow_unauthenticated=bool(_get(data, "allow_unauthenticated", False)),
             public_tools_catalog=bool(_get(data, "public_tools_catalog", False)),
             trusted_proxies=[str(proxy) for proxy in list(_get(data, "trusted_proxies", ["127.0.0.1", "::1"]))],

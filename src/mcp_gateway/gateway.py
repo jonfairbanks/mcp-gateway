@@ -7,11 +7,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from uuid import UUID, uuid4
 
+from .auth import AuthService, ROLE_MEMBER, ROLE_VIEWER
 from .cache import TTLCache
 from .config import AppConfig, UpstreamConfig
 from .jsonrpc import make_error_response, normalize_params
 from .logging import Logger, Timer
 from .postgres import PostgresStore
+from .request_context import AuthenticatedPrincipal, RequestContext
 from .router import build_routes, select_upstream
 from .telemetry import GatewayTelemetry
 from .upstreams import HTTPUpstream, StdioUpstream, UpstreamResponse
@@ -33,6 +35,7 @@ BUILTIN_REDACT_FIELDS = frozenset(
 
 DISCOVERY_METHODS = frozenset({"tools/list", "resources/list", "resources/templates/list", "prompts/list"})
 OPTIONAL_DISCOVERY_METHODS = frozenset({"resources/list", "resources/templates/list", "prompts/list"})
+VIEWER_ALLOWED_METHODS = DISCOVERY_METHODS | frozenset({"initialize", "notifications/initialized"})
 
 
 @dataclass
@@ -77,6 +80,7 @@ class Gateway:
         self._store = store
         self._logger = logger
         self._telemetry = telemetry
+        self._auth = AuthService(config, store, logger)
         self._routes = build_routes(config.upstreams)
         self._memory_cache = TTLCache(config.cache.max_entries)
         self._http_upstreams: Dict[str, HTTPUpstream] = {}
@@ -102,6 +106,62 @@ class Gateway:
             await client.close()
         for client in self._stdio_upstreams.values():
             await client.close()
+
+    async def authenticate_token(self, token: Optional[str]) -> Optional[AuthenticatedPrincipal]:
+        return await self._auth.authenticate_token(token)
+
+    def auth_required(self) -> bool:
+        return self._auth.auth_required()
+
+    def auth_mode_requires_database(self) -> bool:
+        return self._auth.auth_mode_requires_database()
+
+    async def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        return await self._auth.get_user_by_id(user_id)
+
+    async def list_users(self) -> list[Dict[str, Any]]:
+        return await self._auth.list_users()
+
+    async def create_user(self, *, subject: str, display_name: Optional[str], role: str) -> Optional[Dict[str, Any]]:
+        return await self._auth.create_user(subject=subject, display_name=display_name, role=role)
+
+    async def update_user(
+        self,
+        user_id: str,
+        *,
+        display_name: Optional[str] = None,
+        role: Optional[str] = None,
+        is_active: Optional[bool] = None,
+    ) -> Optional[Dict[str, Any]]:
+        return await self._auth.update_user(user_id, display_name=display_name, role=role, is_active=is_active)
+
+    async def list_api_keys(self, *, user_id: str) -> list[Dict[str, Any]]:
+        return await self._auth.list_api_keys(user_id=user_id)
+
+    async def issue_api_key_for_user(
+        self,
+        *,
+        user_id: str,
+        key_name: str,
+        expires_at: Optional[Any] = None,
+    ) -> Dict[str, Optional[str]]:
+        return await self._auth.issue_api_key_for_user(user_id=user_id, key_name=key_name, expires_at=expires_at)
+
+    async def revoke_api_key(self, api_key_id: str, *, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        return await self._auth.revoke_api_key(api_key_id, user_id=user_id)
+
+    async def usage_summary(
+        self,
+        *,
+        group_by: str,
+        from_timestamp: Optional[Any] = None,
+        to_timestamp: Optional[Any] = None,
+    ) -> list[Dict[str, Any]]:
+        return await self._auth.usage_summary(
+            group_by=group_by,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+        )
 
     def _redact_for_storage(self, value: Any) -> Any:
         if isinstance(value, dict):
@@ -199,11 +259,12 @@ class Gateway:
         raw_request: Dict[str, Any],
         upstream_id: Optional[str],
         tool_name: Optional[str],
-        client_id: Optional[str],
+        request_context: RequestContext,
         cache_key: Optional[str],
     ) -> None:
         redacted_params = self._redact_for_storage(params) if params is not None else None
         redacted_raw_request = self._redact_for_storage(raw_request)
+        principal = request_context.principal
         try:
             await self._store.log_request(
                 request_id=request_id,
@@ -212,7 +273,10 @@ class Gateway:
                 raw_request=redacted_raw_request,
                 upstream_id=upstream_id,
                 tool_name=tool_name,
-                client_id=client_id,
+                client_id=request_context.client_id,
+                auth_user_id=principal.user_id if principal else None,
+                auth_api_key_id=principal.api_key_id if principal else None,
+                auth_role=principal.role if principal else None,
                 cache_key=cache_key,
             )
         except Exception as exc:  # noqa: BLE001
@@ -328,16 +392,6 @@ class Gateway:
             upstream_entry = self._health_counters.setdefault(upstream_id, {})
             method_entry = upstream_entry.setdefault(method, {"success": 0, "fail": 0})
             method_entry["success" if success else "fail"] += 1
-            success_count = method_entry["success"]
-            fail_count = method_entry["fail"]
-        self._logger.info(
-            "upstream_health",
-            upstream_id=upstream_id,
-            method=method,
-            success_count=success_count,
-            fail_count=fail_count,
-            last_outcome="success" if success else "fail",
-        )
         self._telemetry.record_upstream_outcome(upstream_id, method, success)
 
     def _get_tool_name(self, method: str, params: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -731,7 +785,7 @@ class Gateway:
         raw_request: Dict[str, Any],
         upstream_id: Optional[str],
         tool_name: Optional[str],
-        client_id: Optional[str],
+        request_context: RequestContext,
         cache_key: Optional[str],
         requested_tool_name: Optional[str] = None,
     ) -> None:
@@ -742,9 +796,10 @@ class Gateway:
             raw_request=raw_request,
             upstream_id=upstream_id,
             tool_name=tool_name,
-            client_id=client_id,
+            request_context=request_context,
             cache_key=cache_key,
         )
+        principal = request_context.principal
         self._logger.info(
             "mcp_request",
             request_id=str(request_id),
@@ -753,9 +808,27 @@ class Gateway:
             tool_name=tool_name,
             tool_name_requested=requested_tool_name,
             tool_alias=self._tool_alias(upstream_id, tool_name),
-            client_id=client_id,
+            client_id=request_context.client_id,
+            auth_subject=principal.subject if principal else None,
+            auth_role=principal.role if principal else None,
             cache_key=cache_key,
         )
+
+    def _role_denial_reason(
+        self,
+        request_context: RequestContext,
+        method: str,
+        tool_name: Optional[str],
+    ) -> Optional[str]:
+        principal = request_context.principal
+        if not principal:
+            return None
+        if principal.role in {ROLE_MEMBER, "admin"}:
+            return None
+        if principal.role == ROLE_VIEWER and method in VIEWER_ALLOWED_METHODS:
+            return None
+        target = f"tool '{tool_name}'" if method == "tools/call" and tool_name else f"method '{method}'"
+        return f"Role '{principal.role}' is not allowed to use {target}"
 
     async def _finalize_request(
         self,
@@ -1070,10 +1143,11 @@ class Gateway:
             raise RuntimeError(self._duplicate_tool_message(registry_state.duplicates))
         await self._apply_tool_registry_state(registry_state)
 
-    async def handle(self, payload: Dict[str, Any], client_id: Optional[str]) -> GatewayResult:
+    async def handle(self, payload: Dict[str, Any], request_context: RequestContext) -> GatewayResult:
         request_id = uuid4()
         method = payload.get("method")
         params = payload.get("params")
+        client_id = request_context.client_id
         if not isinstance(method, str):
             error_payload = make_error_response(payload.get("id"), -32600, "Invalid Request")
             return await self._finalize_request(
@@ -1098,7 +1172,7 @@ class Gateway:
                 raw_request=payload,
                 upstream_id="*",
                 tool_name=None,
-                client_id=client_id,
+                request_context=request_context,
                 cache_key=None,
             )
             timer = Timer()
@@ -1123,7 +1197,7 @@ class Gateway:
                 raw_request=payload,
                 upstream_id="*",
                 tool_name=None,
-                client_id=client_id,
+                request_context=request_context,
                 cache_key=None,
             )
             timer = Timer()
@@ -1163,7 +1237,7 @@ class Gateway:
             raw_request=routed.payload,
             upstream_id=routed.upstream.id,
             tool_name=routed.tool_name,
-            client_id=client_id,
+            request_context=request_context,
             cache_key=routed.cache_key,
             requested_tool_name=routed.requested_tool_name,
         )
@@ -1219,6 +1293,47 @@ class Gateway:
                 event_name="mcp_denied",
                 error=denial_payload.get("error"),
                 extra_log_fields={"reason": denial_reason},
+            )
+
+        role_denial_reason = self._role_denial_reason(request_context, method, routed.tool_name)
+        if role_denial_reason:
+            principal = request_context.principal
+            denial_payload = make_error_response(
+                routed.payload.get("id"),
+                -32001,
+                "Blocked by gateway policy: role not allowed",
+                data={
+                    "category": "role_denied",
+                    "enforcer": "mcp-gateway",
+                    "role": principal.role if principal else None,
+                    "method": method,
+                    "tool_name": routed.tool_name,
+                    "retryable": False,
+                    "suggestion": "Use an allowed role or contact gateway admin to update access.",
+                },
+            )
+            denial_id = uuid4()
+            await self._safe_log_denial(
+                denial_id,
+                request_id,
+                routed.upstream.id if routed.upstream else None,
+                routed.tool_name,
+                role_denial_reason,
+            )
+            self._telemetry.record_denial(routed.upstream.id if routed.upstream else None, routed.tool_name)
+            return await self._finalize_request(
+                request_id=request_id,
+                method=method,
+                response_payload=denial_payload,
+                success=False,
+                cache_hit=False,
+                latency_ms=0,
+                upstream_id=routed.upstream.id if routed.upstream else None,
+                tool_name=routed.tool_name,
+                log_response=False,
+                event_name="mcp_denied",
+                error=denial_payload.get("error"),
+                extra_log_fields={"reason": role_denial_reason},
             )
 
         if routed.payload.get("id") is None:

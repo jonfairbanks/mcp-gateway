@@ -21,7 +21,9 @@ upstreams:
 
     config = load_config(str(config_file))
     assert len(config.upstreams) == 1
+    assert config.gateway.auth_mode == "single_shared"
     assert config.gateway.allow_unauthenticated is False
+    assert config.gateway.bootstrap_admin_api_key == ""
     assert config.gateway.public_tools_catalog is False
     assert config.gateway.sse_queue_max_messages == 100
     assert config.gateway.max_sse_sessions == 1000
@@ -88,6 +90,40 @@ upstreams:
 
     config = load_config(str(config_file))
     assert config.gateway.public_tools_catalog is True
+
+
+def test_loads_postgres_auth_mode_and_bootstrap_key(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  auth_mode: "postgres_api_keys"
+  bootstrap_admin_api_key: "bootstrap-secret"
+upstreams:
+  - id: "remote"
+    transport: "http_sse"
+    endpoint: "https://example.com/mcp"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(str(config_file))
+    assert config.gateway.auth_mode == "postgres_api_keys"
+    assert config.gateway.bootstrap_admin_api_key == "bootstrap-secret"
+
+
+def test_rejects_unknown_auth_mode(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  auth_mode: "nope"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="gateway.auth_mode"):
+        load_config(str(config_file))
 
 
 def test_load_config_expands_required_env_refs(tmp_path, monkeypatch) -> None:
