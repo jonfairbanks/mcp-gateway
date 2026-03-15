@@ -103,6 +103,9 @@ Once you have an admin key, the gateway also exposes JSON management APIs:
 - `DELETE /v1/admin/groups/{group_id}/platform-grants/{permission}`
 - `GET /v1/admin/usage`
 
+A ready-to-import Postman collection for the HTTP API lives at [`docs/postman/mcp-gateway.postman_collection.json`](docs/postman/mcp-gateway.postman_collection.json).
+Set the collection variables `base_url` and `admin_token` first; `user_token`, `group_id`, `user_id`, and `key_id` can be filled in automatically by the create requests.
+
 #### Codex example:
 
 ```toml
