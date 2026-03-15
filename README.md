@@ -16,6 +16,7 @@ Discovery requests such as `initialize` and `tools/list` fan out across upstream
 - Multi-upstream routing (`stdio` and HTTP upstreams).
 - Tool discovery aggregation (`tools/list`, `resources/list`, `resources/templates/list`, `prompts/list`).
 - Per-upstream deny policies with explicit policy-denied errors.
+- PyCasbin-backed RBAC for integration and platform permissions in `postgres_api_keys` mode.
 - Response caching for successful `tools/call`.
 - Structured logs + Postgres request/response/denial/cache tables.
 - Startup warmup and per-upstream health counters.
@@ -61,6 +62,7 @@ Point your MCP client to `/mcp` and include bearer auth.
 By default the gateway refuses to start without `gateway.api_key`; set `gateway.allow_unauthenticated: true` only when you intentionally want an open deployment.
 Set `gateway.public_tools_catalog: true` only if you want `GET /tools` to be browsable without auth; execution endpoints remain protected.
 For multi-user auth, set `gateway.auth_mode: "postgres_api_keys"`, keep `DATABASE_URL` set, and optionally configure `gateway.bootstrap_admin_api_key` for break-glass admin access.
+In `postgres_api_keys` mode, `admin` retains full platform access. Non-admin API-key users authenticate successfully, but tool execution and admin access come from PyCasbin group memberships plus integration or platform grants.
 
 To seed the first database-backed user key:
 
@@ -80,9 +82,25 @@ Once you have an admin key, the gateway also exposes JSON management APIs:
 - `GET /v1/me/api-keys`
 - `POST /v1/me/api-keys`
 - `DELETE /v1/me/api-keys/{key_id}`
+- `GET /v1/admin/identities`
+- `PUT /v1/admin/identities/{subject}`
+- `PATCH /v1/admin/identities/{subject}`
 - `GET /v1/admin/users`
 - `POST /v1/admin/users`
 - `PATCH /v1/admin/users/{user_id}`
+- `GET /v1/admin/integrations`
+- `GET /v1/admin/groups`
+- `POST /v1/admin/groups`
+- `PATCH /v1/admin/groups/{group_id}`
+- `DELETE /v1/admin/groups/{group_id}`
+- `POST /v1/admin/groups/{group_id}/members`
+- `DELETE /v1/admin/groups/{group_id}/members/{subject}`
+- `GET /v1/admin/groups/{group_id}/integration-grants`
+- `POST /v1/admin/groups/{group_id}/integration-grants`
+- `DELETE /v1/admin/groups/{group_id}/integration-grants/{upstream_id}`
+- `GET /v1/admin/groups/{group_id}/platform-grants`
+- `POST /v1/admin/groups/{group_id}/platform-grants`
+- `DELETE /v1/admin/groups/{group_id}/platform-grants/{permission}`
 - `GET /v1/admin/usage`
 
 #### Codex example:
@@ -121,10 +139,26 @@ http_headers = { "Authorization" = "Bearer change-me" }
 - `GET /v1/me/api-keys` lists the caller’s API keys and metadata without returning plaintext secrets.
 - `POST /v1/me/api-keys` creates a new API key for the authenticated user and returns the plaintext key once.
 - `DELETE /v1/me/api-keys/{key_id}` revokes one of the authenticated user’s API keys.
+- `GET /v1/admin/identities` lists local identities keyed by subject; admin only.
+- `PUT /v1/admin/identities/{subject}` creates or replaces a local identity record; admin only.
+- `PATCH /v1/admin/identities/{subject}` updates identity metadata or active status; admin only.
 - `GET /v1/admin/users` lists all managed users with roles and active status; admin only.
 - `POST /v1/admin/users` creates a managed user and can optionally issue an initial API key; admin only.
 - `PATCH /v1/admin/users/{user_id}` updates a user’s display name, role, or active status; admin only.
-- `GET /v1/admin/usage` returns aggregated request and key usage statistics grouped by user or API key; admin only.
+- `GET /v1/admin/integrations` lists configured upstream integration ids that can be granted through PyCasbin; admin only.
+- `GET /v1/admin/groups` lists RBAC groups; admin only.
+- `POST /v1/admin/groups` creates an RBAC group; admin only.
+- `PATCH /v1/admin/groups/{group_id}` updates an RBAC group; admin only.
+- `DELETE /v1/admin/groups/{group_id}` deletes an RBAC group; admin only.
+- `POST /v1/admin/groups/{group_id}/members` adds a subject to an RBAC group; admin only.
+- `DELETE /v1/admin/groups/{group_id}/members/{subject}` removes a subject from an RBAC group; admin only.
+- `GET /v1/admin/groups/{group_id}/integration-grants` lists integration grants for a group; admin only.
+- `POST /v1/admin/groups/{group_id}/integration-grants` grants one upstream integration to a group; admin only.
+- `DELETE /v1/admin/groups/{group_id}/integration-grants/{upstream_id}` removes one integration grant from a group; admin only.
+- `GET /v1/admin/groups/{group_id}/platform-grants` lists platform permissions for a group; admin only.
+- `POST /v1/admin/groups/{group_id}/platform-grants` grants one platform permission to a group; admin only.
+- `DELETE /v1/admin/groups/{group_id}/platform-grants/{permission}` removes one platform permission from a group; admin only.
+- `GET /v1/admin/usage` returns aggregated request and key usage statistics grouped by subject, integration, or API key; admin only.
 
 ## Docker
 

@@ -112,12 +112,13 @@ upstreams:
     assert config.gateway.bootstrap_admin_api_key == "bootstrap-secret"
 
 
-def test_rejects_unknown_auth_mode(tmp_path) -> None:
+@pytest.mark.parametrize("auth_mode", ["dual_migration", "oidc_jwt", "nope"])
+def test_rejects_unknown_auth_mode(tmp_path, auth_mode: str) -> None:
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
-        """
+        f"""
 gateway:
-  auth_mode: "nope"
+  auth_mode: "{auth_mode}"
 """.strip(),
         encoding="utf-8",
     )
@@ -172,6 +173,25 @@ upstreams:
     config = load_config(str(config_file))
     assert config.gateway.api_key == "fallback-secret"
     assert config.upstreams[0].cwd == "/tmp/mcp-gateway"
+
+
+def test_rejects_invalid_bearer_token_env_var_name(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+upstreams:
+  - id: "github"
+    transport: "http_sse"
+    endpoint: "https://example.com/mcp"
+    bearer_token_env_var: "github_pat_example-token"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Invalid environment variable name"):
+        load_config(str(config_file))
 
 
 def test_load_config_rejects_missing_required_env_refs(tmp_path, monkeypatch) -> None:

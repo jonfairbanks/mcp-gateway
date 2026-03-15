@@ -6,8 +6,11 @@ import json
 import os
 import sys
 
-from .auth import AUTH_MODE_POSTGRES_API_KEYS, AuthService
-from .config import load_config
+from .auth import AuthService
+from .config import (
+    AUTH_MODE_POSTGRES_API_KEYS,
+    load_config,
+)
 from .gateway import Gateway
 from .logging import Logger
 from .postgres import PostgresStore
@@ -94,7 +97,7 @@ def _validate_database_runtime(config, logger: Logger, dsn: str) -> None:
         "database_required",
         reason="DATABASE_URL not set",
         auth_mode=config.gateway.auth_mode,
-        suggestion="Set DATABASE_URL or switch gateway.auth_mode to single_shared",
+            suggestion="Set DATABASE_URL or switch gateway.auth_mode to single_shared",
     )
     raise SystemExit(2)
 

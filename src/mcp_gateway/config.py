@@ -8,6 +8,16 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 ENV_REF_PATTERN = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}")
+ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+AUTH_MODE_SINGLE_SHARED = "single_shared"
+AUTH_MODE_POSTGRES_API_KEYS = "postgres_api_keys"
+VALID_AUTH_MODES = frozenset(
+    {
+        AUTH_MODE_SINGLE_SHARED,
+        AUTH_MODE_POSTGRES_API_KEYS,
+    }
+)
 
 
 @dataclass
@@ -29,9 +39,9 @@ class GatewayConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
-        auth_mode = str(_get(data, "auth_mode", "single_shared"))
-        if auth_mode not in {"single_shared", "postgres_api_keys"}:
-            raise ValueError("gateway.auth_mode must be 'single_shared' or 'postgres_api_keys'")
+        auth_mode = str(_get(data, "auth_mode", AUTH_MODE_SINGLE_SHARED))
+        if auth_mode not in VALID_AUTH_MODES:
+            raise ValueError("gateway.auth_mode must be one of: single_shared, postgres_api_keys")
         return cls(
             listen_host=_get(data, "listen_host", "0.0.0.0"),
             listen_port=int(_get(data, "listen_port", 8080)),
@@ -103,13 +113,16 @@ class UpstreamConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "UpstreamConfig":
+        upstream_id = data["id"]
+        bearer_token_env_var = data.get("bearer_token_env_var")
+        _validate_env_var_name(bearer_token_env_var, f"upstreams[{upstream_id}].bearer_token_env_var")
         return cls(
-            id=data["id"],
-            name=data.get("name", data["id"]),
+            id=upstream_id,
+            name=data.get("name", upstream_id),
             transport=data["transport"],
             endpoint=data.get("endpoint"),
             http_headers={str(key): str(value) for key, value in (data.get("http_headers", {}) or {}).items()},
-            bearer_token_env_var=data.get("bearer_token_env_var"),
+            bearer_token_env_var=bearer_token_env_var,
             http_serialize_requests=bool(data.get("http_serialize_requests", False)),
             command=_normalize_stdio_command(data),
             env={str(key): str(value) for key, value in (data.get("env", {}) or {}).items()},
@@ -153,6 +166,13 @@ def _optional_int(value: Any) -> Optional[int]:
     if value is None:
         return None
     return int(value)
+
+
+def _validate_env_var_name(value: Any, path: str) -> None:
+    if value in (None, ""):
+        return
+    if not isinstance(value, str) or not ENV_NAME_PATTERN.fullmatch(value):
+        raise ValueError(f"Invalid environment variable name for '{path}': {value!r}")
 
 
 def _normalize_stdio_command(item: Dict[str, Any]) -> Optional[List[str]]:

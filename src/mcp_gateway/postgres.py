@@ -41,6 +41,10 @@ class PostgresStore:
         auth_api_key_id: Optional[str],
         auth_role: Optional[str],
         cache_key: Optional[str],
+        auth_subject: Optional[str] = None,
+        auth_scheme: Optional[str] = None,
+        auth_group_names: Optional[list[str]] = None,
+        authorized_upstream_id: Optional[str] = None,
     ) -> None:
         if not self._pool:
             return
@@ -58,9 +62,13 @@ class PostgresStore:
                     auth_user_id,
                     auth_api_key_id,
                     auth_role,
+                    auth_subject,
+                    auth_scheme,
+                    auth_group_names,
+                    authorized_upstream_id,
                     cache_key
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     request_id,
@@ -73,6 +81,10 @@ class PostgresStore:
                     auth_user_id,
                     auth_api_key_id,
                     auth_role,
+                    auth_subject,
+                    auth_scheme,
+                    Jsonb(auth_group_names or []),
+                    authorized_upstream_id,
                     cache_key,
                 ),
             )
@@ -174,14 +186,52 @@ class PostgresStore:
             cur = await conn.execute("DELETE FROM mcp_cache WHERE expires_at < now()")
             return max(0, cur.rowcount)
 
+    async def _ensure_policy_state(self, conn) -> None:
+        await conn.execute(
+            """
+            INSERT INTO gateway_policy_state (singleton_key, policy_revision)
+            VALUES ('default', 0)
+            ON CONFLICT (singleton_key) DO NOTHING
+            """
+        )
+
+    async def get_policy_revision(self) -> int:
+        if not self._pool:
+            return 0
+        async with self._pool.connection() as conn:
+            await self._ensure_policy_state(conn)
+            cur = await conn.execute(
+                """
+                SELECT policy_revision
+                FROM gateway_policy_state
+                WHERE singleton_key = 'default'
+                """
+            )
+            row = await cur.fetchone()
+            return int(row["policy_revision"]) if row else 0
+
+    async def _bump_policy_revision(self, conn) -> None:
+        await self._ensure_policy_state(conn)
+        await conn.execute(
+            """
+            UPDATE gateway_policy_state
+            SET policy_revision = policy_revision + 1, updated_at = now()
+            WHERE singleton_key = 'default'
+            """
+        )
+
     @staticmethod
     def _serialize_user_row(row: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "id": str(row["id"]),
             "subject": row["subject"],
-            "display_name": row["display_name"],
-            "role": row["role"],
+            "display_name": row.get("display_name"),
+            "role": row.get("role"),
+            "issuer": row.get("issuer"),
+            "email": row.get("email"),
+            "auth_source": row.get("auth_source"),
             "is_active": row["is_active"],
+            "last_seen_at": row["last_seen_at"].isoformat() if row.get("last_seen_at") is not None else None,
             "created_at": row["created_at"].isoformat() if row.get("created_at") is not None else None,
             "updated_at": row["updated_at"].isoformat() if row.get("updated_at") is not None else None,
         }
@@ -201,6 +251,17 @@ class PostgresStore:
         }
 
     @staticmethod
+    def _serialize_group_row(row: Dict[str, Any], *, is_reserved: bool = False) -> Dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "name": row["name"],
+            "description": row.get("description"),
+            "is_reserved": is_reserved,
+            "created_at": row["created_at"].isoformat() if row.get("created_at") is not None else None,
+            "updated_at": row["updated_at"].isoformat() if row.get("updated_at") is not None else None,
+        }
+
+    @staticmethod
     def _serialize_usage_row(row: Dict[str, Any], group_by: str) -> Dict[str, Any]:
         payload = {
             "request_count": row["request_count"],
@@ -210,25 +271,31 @@ class PostgresStore:
             "cache_hit_count": row["cache_hit_count"],
             "last_used_at": row["last_used_at"].isoformat() if row.get("last_used_at") is not None else None,
         }
-        if group_by == "user":
+        if group_by == "subject":
             payload.update(
                 {
-                    "user_id": str(row["user_id"]),
                     "subject": row["subject"],
-                    "display_name": row["display_name"],
-                    "role": row["role"],
+                    "display_name": row.get("display_name"),
+                    "email": row.get("email"),
+                    "auth_scheme": row.get("auth_scheme"),
+                }
+            )
+        elif group_by == "integration":
+            payload.update(
+                {
+                    "upstream_id": row["authorized_upstream_id"],
                 }
             )
         else:
             payload.update(
                 {
                     "api_key_id": str(row["api_key_id"]),
-                    "user_id": str(row["user_id"]),
-                    "subject": row["subject"],
-                    "display_name": row["display_name"],
-                    "role": row["role"],
-                    "key_name": row["key_name"],
-                    "key_prefix": row["key_prefix"],
+                    "user_id": str(row["user_id"]) if row.get("user_id") is not None else None,
+                    "subject": row.get("subject"),
+                    "display_name": row.get("display_name"),
+                    "role": row.get("role"),
+                    "key_name": row.get("key_name"),
+                    "key_prefix": row.get("key_prefix"),
                 }
             )
         return payload
@@ -274,7 +341,7 @@ class PostgresStore:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """
-                SELECT id, subject, display_name, role, is_active, created_at, updated_at
+                SELECT id, subject, display_name, role, issuer, email, auth_source, is_active, last_seen_at, created_at, updated_at
                 FROM gateway_users
                 WHERE id = %s
                 """,
@@ -289,7 +356,7 @@ class PostgresStore:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """
-                SELECT id, subject, display_name, role, is_active, created_at, updated_at
+                SELECT id, subject, display_name, role, issuer, email, auth_source, is_active, last_seen_at, created_at, updated_at
                 FROM gateway_users
                 WHERE subject = %s
                 """,
@@ -304,10 +371,10 @@ class PostgresStore:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """
-                INSERT INTO gateway_users (id, subject, display_name, role)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO gateway_users (id, subject, display_name, role, auth_source)
+                VALUES (%s, %s, %s, %s, 'legacy_api_key')
                 ON CONFLICT (subject) DO NOTHING
-                RETURNING id, subject, display_name, role, is_active, created_at, updated_at
+                RETURNING id, subject, display_name, role, issuer, email, auth_source, is_active, last_seen_at, created_at, updated_at
                 """,
                 (uuid4(), subject, display_name, role),
             )
@@ -320,7 +387,7 @@ class PostgresStore:
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """
-                SELECT id, subject, display_name, role, is_active, created_at, updated_at
+                SELECT id, subject, display_name, role, issuer, email, auth_source, is_active, last_seen_at, created_at, updated_at
                 FROM gateway_users
                 ORDER BY created_at ASC, subject ASC
                 """
@@ -348,12 +415,378 @@ class PostgresStore:
                     is_active = COALESCE(%s, is_active),
                     updated_at = now()
                 WHERE id = %s
-                RETURNING id, subject, display_name, role, is_active, created_at, updated_at
+                RETURNING id, subject, display_name, role, issuer, email, auth_source, is_active, last_seen_at, created_at, updated_at
                 """,
                 (display_name, role, is_active, user_id),
             )
             row = await cur.fetchone()
             return self._serialize_user_row(row) if row else None
+
+    async def put_identity(
+        self,
+        *,
+        subject: str,
+        display_name: str,
+        email: Optional[str],
+        is_active: bool,
+    ) -> Dict[str, Any]:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                INSERT INTO gateway_users (id, subject, display_name, email, auth_source, is_active)
+                VALUES (%s, %s, %s, %s, 'manual', %s)
+                ON CONFLICT (subject)
+                DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    email = EXCLUDED.email,
+                    is_active = EXCLUDED.is_active,
+                    updated_at = now()
+                RETURNING id, subject, display_name, role, issuer, email, auth_source, is_active, last_seen_at, created_at, updated_at
+                """,
+                (uuid4(), subject, display_name, email, is_active),
+            )
+            row = await cur.fetchone()
+            assert row is not None
+            return self._serialize_user_row(row)
+
+    async def patch_identity(
+        self,
+        subject: str,
+        *,
+        display_name: Optional[str] = None,
+        email: Optional[str] = None,
+        is_active: Optional[bool] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                UPDATE gateway_users
+                SET
+                    display_name = COALESCE(%s, display_name),
+                    email = COALESCE(%s, email),
+                    is_active = COALESCE(%s, is_active),
+                    updated_at = now()
+                WHERE subject = %s
+                RETURNING id, subject, display_name, role, issuer, email, auth_source, is_active, last_seen_at, created_at, updated_at
+                """,
+                (display_name, email, is_active, subject),
+            )
+            row = await cur.fetchone()
+            return self._serialize_user_row(row) if row else None
+
+    async def list_identities(self) -> list[Dict[str, Any]]:
+        return await self.list_users()
+
+    async def list_group_names_for_subject(self, subject: str) -> list[str]:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                SELECT g.name
+                FROM gateway_groups AS g
+                JOIN gateway_group_memberships AS m
+                  ON m.group_id = g.id
+                JOIN gateway_users AS u
+                  ON u.id = m.user_id
+                WHERE u.subject = %s
+                ORDER BY g.name ASC
+                """,
+                (subject,),
+            )
+            rows = await cur.fetchall()
+            return [str(row["name"]) for row in rows]
+
+    async def list_groups(self) -> list[Dict[str, Any]]:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                SELECT id, name, description, created_at, updated_at
+                FROM gateway_groups
+                ORDER BY name ASC
+                """
+            )
+            rows = await cur.fetchall()
+            return [self._serialize_group_row(row) for row in rows]
+
+    async def create_group(self, *, name: str, description: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                INSERT INTO gateway_groups (id, name, description)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (name) DO NOTHING
+                RETURNING id, name, description, created_at, updated_at
+                """,
+                (uuid4(), name, description),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            await self._bump_policy_revision(conn)
+            return self._serialize_group_row(row)
+
+    async def update_group(
+        self,
+        group_id: str,
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                UPDATE gateway_groups
+                SET
+                    name = COALESCE(%s, name),
+                    description = COALESCE(%s, description),
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING id, name, description, created_at, updated_at
+                """,
+                (name, description, group_id),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            await self._bump_policy_revision(conn)
+            return self._serialize_group_row(row)
+
+    async def delete_group(self, group_id: str) -> bool:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute("DELETE FROM gateway_groups WHERE id = %s", (group_id,))
+            deleted = cur.rowcount > 0
+            if deleted:
+                await self._bump_policy_revision(conn)
+            return deleted
+
+    async def _ensure_identity_row(self, conn, subject: str) -> Dict[str, Any]:
+        cur = await conn.execute(
+            """
+            INSERT INTO gateway_users (id, subject, display_name, auth_source)
+            VALUES (%s, %s, %s, 'manual')
+            ON CONFLICT (subject)
+            DO UPDATE SET updated_at = now()
+            RETURNING id, subject, display_name, role, issuer, email, auth_source, is_active, last_seen_at, created_at, updated_at
+            """,
+            (uuid4(), subject, subject),
+        )
+        row = await cur.fetchone()
+        assert row is not None
+        return row
+
+    async def add_group_member(self, group_id: str, *, subject: str) -> Dict[str, Any]:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            user_row = await self._ensure_identity_row(conn, subject)
+            await conn.execute(
+                """
+                INSERT INTO gateway_group_memberships (group_id, user_id)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (group_id, user_row["id"]),
+            )
+            await self._bump_policy_revision(conn)
+            return {"group_id": group_id, "subject": subject}
+
+    async def remove_group_member(self, group_id: str, *, subject: str) -> bool:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                DELETE FROM gateway_group_memberships AS m
+                USING gateway_users AS u
+                WHERE m.group_id = %s
+                  AND m.user_id = u.id
+                  AND u.subject = %s
+                """,
+                (group_id, subject),
+            )
+            deleted = cur.rowcount > 0
+            if deleted:
+                await self._bump_policy_revision(conn)
+            return deleted
+
+    async def list_group_integration_grants(self, group_id: str) -> list[Dict[str, Any]]:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                SELECT upstream_id, created_at
+                FROM gateway_group_integration_grants
+                WHERE group_id = %s
+                ORDER BY upstream_id ASC
+                """,
+                (group_id,),
+            )
+            rows = await cur.fetchall()
+            return [
+                {
+                    "upstream_id": row["upstream_id"],
+                    "created_at": row["created_at"].isoformat() if row.get("created_at") is not None else None,
+                }
+                for row in rows
+            ]
+
+    async def add_group_integration_grant(self, group_id: str, *, upstream_id: str) -> Dict[str, Any]:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                INSERT INTO gateway_group_integration_grants (group_id, upstream_id)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING upstream_id, created_at
+                """,
+                (group_id, upstream_id),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                cur = await conn.execute(
+                    """
+                    SELECT upstream_id, created_at
+                    FROM gateway_group_integration_grants
+                    WHERE group_id = %s AND upstream_id = %s
+                    """,
+                    (group_id, upstream_id),
+                )
+                row = await cur.fetchone()
+            assert row is not None
+            await self._bump_policy_revision(conn)
+            return {
+                "upstream_id": row["upstream_id"],
+                "created_at": row["created_at"].isoformat() if row.get("created_at") is not None else None,
+            }
+
+    async def remove_group_integration_grant(self, group_id: str, *, upstream_id: str) -> bool:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                DELETE FROM gateway_group_integration_grants
+                WHERE group_id = %s AND upstream_id = %s
+                """,
+                (group_id, upstream_id),
+            )
+            deleted = cur.rowcount > 0
+            if deleted:
+                await self._bump_policy_revision(conn)
+            return deleted
+
+    async def list_group_platform_grants(self, group_id: str) -> list[Dict[str, Any]]:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                SELECT permission, created_at
+                FROM gateway_group_platform_grants
+                WHERE group_id = %s
+                ORDER BY permission ASC
+                """,
+                (group_id,),
+            )
+            rows = await cur.fetchall()
+            return [
+                {
+                    "permission": row["permission"],
+                    "created_at": row["created_at"].isoformat() if row.get("created_at") is not None else None,
+                }
+                for row in rows
+            ]
+
+    async def add_group_platform_grant(self, group_id: str, *, permission: str) -> Dict[str, Any]:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                INSERT INTO gateway_group_platform_grants (group_id, permission)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING permission, created_at
+                """,
+                (group_id, permission),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                cur = await conn.execute(
+                    """
+                    SELECT permission, created_at
+                    FROM gateway_group_platform_grants
+                    WHERE group_id = %s AND permission = %s
+                    """,
+                    (group_id, permission),
+                )
+                row = await cur.fetchone()
+            assert row is not None
+            await self._bump_policy_revision(conn)
+            return {
+                "permission": row["permission"],
+                "created_at": row["created_at"].isoformat() if row.get("created_at") is not None else None,
+            }
+
+    async def remove_group_platform_grant(self, group_id: str, *, permission: str) -> bool:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                DELETE FROM gateway_group_platform_grants
+                WHERE group_id = %s AND permission = %s
+                """,
+                (group_id, permission),
+            )
+            deleted = cur.rowcount > 0
+            if deleted:
+                await self._bump_policy_revision(conn)
+            return deleted
+
+    async def list_group_integration_policies(self) -> list[Dict[str, Any]]:
+        if not self._pool:
+            return []
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                SELECT g.name AS group_name, grants.upstream_id
+                FROM gateway_group_integration_grants AS grants
+                JOIN gateway_groups AS g ON g.id = grants.group_id
+                ORDER BY g.name ASC, grants.upstream_id ASC
+                """
+            )
+            return await cur.fetchall()
+
+    async def list_group_platform_policies(self) -> list[Dict[str, Any]]:
+        if not self._pool:
+            return []
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                SELECT g.name AS group_name, grants.permission
+                FROM gateway_group_platform_grants AS grants
+                JOIN gateway_groups AS g ON g.id = grants.group_id
+                ORDER BY g.name ASC, grants.permission ASC
+                """
+            )
+            return await cur.fetchall()
 
     async def list_api_keys(self, *, user_id: str) -> list[Dict[str, Any]]:
         if not self._pool:
@@ -426,25 +859,34 @@ class PostgresStore:
     ) -> list[Dict[str, Any]]:
         if not self._pool:
             raise RuntimeError("Postgres is not available")
-        if group_by not in {"user", "api_key"}:
-            raise ValueError("group_by must be one of: user, api_key")
+        normalized_group_by = "subject" if group_by == "user" else group_by
+        if normalized_group_by not in {"subject", "integration", "api_key"}:
+            raise ValueError("group_by must be one of: subject, integration, api_key")
 
-        if group_by == "user":
+        if normalized_group_by == "subject":
             select_identity = """
-                summary.auth_user_id AS user_id,
-                users.subject,
+                summary.auth_subject AS subject,
                 users.display_name,
-                summary.auth_role AS role
+                users.email,
+                summary.auth_scheme
             """
-            join_identity = "LEFT JOIN gateway_users AS users ON users.id = summary.auth_user_id"
-            group_identity = "summary.auth_user_id, users.subject, users.display_name, summary.auth_role"
-            order_identity = "request_count DESC, last_used_at DESC, users.subject ASC"
-            null_filter = "summary.auth_user_id IS NOT NULL"
+            join_identity = "LEFT JOIN gateway_users AS users ON users.subject = summary.auth_subject"
+            group_identity = "summary.auth_subject, users.display_name, users.email, summary.auth_scheme"
+            order_identity = "request_count DESC, last_used_at DESC, summary.auth_subject ASC"
+            null_filter = "summary.auth_subject IS NOT NULL"
+        elif normalized_group_by == "integration":
+            select_identity = """
+                summary.authorized_upstream_id
+            """
+            join_identity = ""
+            group_identity = "summary.authorized_upstream_id"
+            order_identity = "request_count DESC, last_used_at DESC, summary.authorized_upstream_id ASC"
+            null_filter = "summary.authorized_upstream_id IS NOT NULL"
         else:
             select_identity = """
                 summary.auth_api_key_id AS api_key_id,
                 summary.auth_user_id AS user_id,
-                users.subject,
+                summary.auth_subject AS subject,
                 users.display_name,
                 summary.auth_role AS role,
                 keys.key_name,
@@ -457,7 +899,7 @@ class PostgresStore:
             group_identity = """
                 summary.auth_api_key_id,
                 summary.auth_user_id,
-                users.subject,
+                summary.auth_subject,
                 users.display_name,
                 summary.auth_role,
                 keys.key_name,
@@ -477,6 +919,9 @@ class PostgresStore:
                         req.auth_user_id,
                         req.auth_api_key_id,
                         req.auth_role,
+                        req.auth_subject,
+                        req.auth_scheme,
+                        req.authorized_upstream_id,
                         EXISTS (
                             SELECT 1
                             FROM mcp_responses AS resp
@@ -515,7 +960,7 @@ class PostgresStore:
                 (from_timestamp, from_timestamp, to_timestamp, to_timestamp),
             )
             rows = await cur.fetchall()
-            return [self._serialize_usage_row(row, group_by) for row in rows]
+            return [self._serialize_usage_row(row, normalized_group_by) for row in rows]
 
     async def issue_api_key(
         self,
@@ -535,12 +980,13 @@ class PostgresStore:
         async with self._pool.connection() as conn:
             await conn.execute(
                 """
-                INSERT INTO gateway_users (id, subject, display_name, role)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO gateway_users (id, subject, display_name, role, auth_source)
+                VALUES (%s, %s, %s, %s, 'legacy_api_key')
                 ON CONFLICT (subject)
                 DO UPDATE SET
                     display_name = EXCLUDED.display_name,
                     role = EXCLUDED.role,
+                    auth_source = 'legacy_api_key',
                     updated_at = now()
                 """,
                 (user_id, subject, display_name, role),

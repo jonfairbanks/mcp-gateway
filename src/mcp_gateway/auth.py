@@ -7,13 +7,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
-from .config import AppConfig
+from .authorization import RESERVED_GROUP_NAMES
+from .config import AUTH_MODE_POSTGRES_API_KEYS, AUTH_MODE_SINGLE_SHARED, AppConfig
 from .logging import Logger
 from .postgres import PostgresStore
 from .request_context import AuthenticatedPrincipal
 
-AUTH_MODE_SINGLE_SHARED = "single_shared"
-AUTH_MODE_POSTGRES_API_KEYS = "postgres_api_keys"
 ROLE_ADMIN = "admin"
 ROLE_MEMBER = "member"
 ROLE_VIEWER = "viewer"
@@ -57,18 +56,25 @@ class AuthService:
         self._store = store
         self._logger = logger
 
+    async def close(self) -> None:
+        return None
+
     def auth_mode_requires_database(self) -> bool:
         return self._config.gateway.auth_mode == AUTH_MODE_POSTGRES_API_KEYS
 
     def auth_required(self) -> bool:
-        if self._config.gateway.auth_mode == AUTH_MODE_SINGLE_SHARED:
+        auth_mode = self._config.gateway.auth_mode
+        if auth_mode == AUTH_MODE_SINGLE_SHARED:
             return bool(self._config.gateway.api_key)
         return not self._config.gateway.allow_unauthenticated
 
     async def authenticate_token(self, token: Optional[str]) -> Optional[AuthenticatedPrincipal]:
-        if self._config.gateway.auth_mode == AUTH_MODE_SINGLE_SHARED:
+        auth_mode = self._config.gateway.auth_mode
+        if auth_mode == AUTH_MODE_SINGLE_SHARED:
             return self._authenticate_single_shared(token)
-        return await self._authenticate_postgres_api_key(token)
+        if auth_mode == AUTH_MODE_POSTGRES_API_KEYS:
+            return await self._authenticate_postgres_api_key(token)
+        raise AuthUnavailableError(f"Unsupported auth mode: {auth_mode}")
 
     def _authenticate_single_shared(self, token: Optional[str]) -> Optional[AuthenticatedPrincipal]:
         expected = self._config.gateway.api_key
@@ -76,7 +82,11 @@ class AuthService:
             return None
         if not hmac.compare_digest(token, expected):
             return None
-        return AuthenticatedPrincipal(subject="gateway", auth_scheme="shared_bearer", role=ROLE_ADMIN)
+        return AuthenticatedPrincipal(
+            subject="gateway",
+            auth_scheme="shared_bearer",
+            role=ROLE_ADMIN,
+        )
 
     async def _authenticate_postgres_api_key(self, token: Optional[str]) -> Optional[AuthenticatedPrincipal]:
         if not token:
@@ -102,12 +112,21 @@ class AuthService:
             await self._store.touch_api_key_last_used(str(row["api_key_id"]))
         except Exception as exc:  # noqa: BLE001
             self._logger.warn("auth_backend_touch_failed", api_key_id=str(row["api_key_id"]), error=str(exc))
+        try:
+            group_names = await self._store.list_group_names_for_subject(str(row["subject"]))
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error("auth_backend_unavailable", auth_mode=self._config.gateway.auth_mode, error=str(exc))
+            raise AuthUnavailableError("Auth backend unavailable") from exc
+        role = row["role"]
         return AuthenticatedPrincipal(
             subject=row["subject"],
             auth_scheme="postgres_api_key",
-            role=row["role"],
+            display_name=row.get("display_name"),
+            role=role,
+            group_names=tuple(sorted({str(group_name) for group_name in group_names})),
             user_id=str(row["user_id"]),
             api_key_id=str(row["api_key_id"]),
+            legacy_api_key_id=str(row["api_key_id"]),
         )
 
     async def issue_api_key(
@@ -226,6 +245,122 @@ class AuthService:
             role=normalized_role,
             is_active=is_active,
         )
+
+    async def list_identities(self) -> list[Dict[str, Any]]:
+        return await self._store.list_identities()
+
+    async def put_identity(
+        self,
+        subject: str,
+        *,
+        display_name: Optional[str] = None,
+        email: Optional[str] = None,
+        is_active: bool = True,
+    ) -> Dict[str, Any]:
+        normalized_subject = subject.strip()
+        if not normalized_subject:
+            raise ValueError("subject is required")
+        return await self._store.put_identity(
+            subject=normalized_subject,
+            display_name=(display_name or normalized_subject).strip(),
+            email=email.strip() if isinstance(email, str) and email.strip() else None,
+            is_active=is_active,
+        )
+
+    async def patch_identity(
+        self,
+        subject: str,
+        *,
+        display_name: Optional[str] = None,
+        email: Optional[str] = None,
+        is_active: Optional[bool] = None,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_subject = subject.strip()
+        if not normalized_subject:
+            raise ValueError("subject is required")
+        normalized_display_name = display_name.strip() if isinstance(display_name, str) else None
+        normalized_email = email.strip() if isinstance(email, str) and email.strip() else None
+        return await self._store.patch_identity(
+            subject=normalized_subject,
+            display_name=normalized_display_name,
+            email=normalized_email,
+            is_active=is_active,
+        )
+
+    async def list_groups(self) -> list[Dict[str, Any]]:
+        return await self._store.list_groups()
+
+    async def create_group(self, *, name: str, description: Optional[str]) -> Optional[Dict[str, Any]]:
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise ValueError("name is required")
+        if normalized_name in RESERVED_GROUP_NAMES:
+            raise ValueError(f"{normalized_name} is reserved")
+        return await self._store.create_group(name=normalized_name, description=(description or "").strip() or None)
+
+    async def update_group(
+        self,
+        group_id: str,
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_name = name.strip() if isinstance(name, str) else None
+        if normalized_name in RESERVED_GROUP_NAMES:
+            raise ValueError(f"{normalized_name} is reserved")
+        normalized_description = description.strip() if isinstance(description, str) else None
+        return await self._store.update_group(group_id, name=normalized_name, description=normalized_description)
+
+    async def delete_group(self, group_id: str) -> bool:
+        return await self._store.delete_group(group_id)
+
+    async def add_group_member(self, group_id: str, *, subject: str) -> Dict[str, Any]:
+        normalized_subject = subject.strip()
+        if not normalized_subject:
+            raise ValueError("subject is required")
+        return await self._store.add_group_member(group_id, subject=normalized_subject)
+
+    async def remove_group_member(self, group_id: str, *, subject: str) -> bool:
+        normalized_subject = subject.strip()
+        if not normalized_subject:
+            raise ValueError("subject is required")
+        return await self._store.remove_group_member(group_id, subject=normalized_subject)
+
+    async def list_group_integration_grants(self, group_id: str) -> list[Dict[str, Any]]:
+        return await self._store.list_group_integration_grants(group_id)
+
+    async def add_group_integration_grant(self, group_id: str, *, upstream_id: str) -> Dict[str, Any]:
+        normalized_upstream_id = upstream_id.strip()
+        if not normalized_upstream_id:
+            raise ValueError("upstream_id is required")
+        return await self._store.add_group_integration_grant(group_id, upstream_id=normalized_upstream_id)
+
+    async def remove_group_integration_grant(self, group_id: str, *, upstream_id: str) -> bool:
+        normalized_upstream_id = upstream_id.strip()
+        if not normalized_upstream_id:
+            raise ValueError("upstream_id is required")
+        return await self._store.remove_group_integration_grant(group_id, upstream_id=normalized_upstream_id)
+
+    async def list_group_platform_grants(self, group_id: str) -> list[Dict[str, Any]]:
+        return await self._store.list_group_platform_grants(group_id)
+
+    async def add_group_platform_grant(self, group_id: str, *, permission: str) -> Dict[str, Any]:
+        normalized_permission = permission.strip()
+        if normalized_permission not in {
+            "admin.identities.read",
+            "admin.identities.write",
+            "admin.groups.read",
+            "admin.groups.write",
+            "admin.usage.read",
+        }:
+            raise ValueError("permission is not supported")
+        return await self._store.add_group_platform_grant(group_id, permission=normalized_permission)
+
+    async def remove_group_platform_grant(self, group_id: str, *, permission: str) -> bool:
+        normalized_permission = permission.strip()
+        if not normalized_permission:
+            raise ValueError("permission is required")
+        return await self._store.remove_group_platform_grant(group_id, permission=normalized_permission)
 
     async def list_api_keys(self, *, user_id: str) -> list[Dict[str, Any]]:
         return await self._store.list_api_keys(user_id=user_id)

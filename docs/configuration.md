@@ -56,16 +56,32 @@ When `gateway.auth_mode` is `postgres_api_keys`, the gateway exposes:
 - `GET /v1/me/api-keys`
 - `POST /v1/me/api-keys`
 - `DELETE /v1/me/api-keys/{key_id}`
+- `GET /v1/admin/identities`
+- `PUT /v1/admin/identities/{subject}`
+- `PATCH /v1/admin/identities/{subject}`
 - `GET /v1/admin/users`
 - `POST /v1/admin/users`
 - `PATCH /v1/admin/users/{user_id}`
+- `GET /v1/admin/integrations`
+- `GET /v1/admin/groups`
+- `POST /v1/admin/groups`
+- `PATCH /v1/admin/groups/{group_id}`
+- `DELETE /v1/admin/groups/{group_id}`
+- `POST /v1/admin/groups/{group_id}/members`
+- `DELETE /v1/admin/groups/{group_id}/members/{subject}`
+- `GET /v1/admin/groups/{group_id}/integration-grants`
+- `POST /v1/admin/groups/{group_id}/integration-grants`
+- `DELETE /v1/admin/groups/{group_id}/integration-grants/{upstream_id}`
+- `GET /v1/admin/groups/{group_id}/platform-grants`
+- `POST /v1/admin/groups/{group_id}/platform-grants`
+- `DELETE /v1/admin/groups/{group_id}/platform-grants/{permission}`
 - `GET /v1/admin/usage`
 
 Role behavior:
 
-- `admin`: full MCP access plus user management, usage reporting, and API key management
-- `member`: full MCP access plus self-service API key management
-- `viewer`: discovery-only MCP access; self-service endpoints still require a database-backed user principal
+- `admin`: full MCP access plus user management, RBAC management, usage reporting, and API key management
+- `member`: no built-in integration grants; self-service API key management remains available, but tool execution comes from PyCasbin group memberships and integration grants
+- `viewer`: no built-in integration grants; discovery still works, and tool execution comes from PyCasbin group memberships and integration grants
 
 ## `upstreams[]`
 

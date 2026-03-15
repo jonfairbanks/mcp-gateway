@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 
 @dataclass(frozen=True)
 class AuthenticatedPrincipal:
     subject: str
     auth_scheme: str
-    role: str = "admin"
+    issuer: Optional[str] = None
+    display_name: Optional[str] = None
+    email: Optional[str] = None
+    group_names: Tuple[str, ...] = ()
+    role: Optional[str] = None
     user_id: Optional[str] = None
     api_key_id: Optional[str] = None
+    legacy_api_key_id: Optional[str] = None
     is_bootstrap_admin: bool = False
 
 

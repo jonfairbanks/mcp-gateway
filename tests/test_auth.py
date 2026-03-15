@@ -20,6 +20,7 @@ class FakeStore:
         self.identity = None
         self.touched: list[str] = []
         self.issued = None
+        self.group_names: list[str] = []
 
     async def find_api_key_identity(self, key_prefix: str):
         if self.identity and self.identity["key_prefix"] == key_prefix:
@@ -40,6 +41,9 @@ class FakeStore:
             "key_name": kwargs["key_name"],
             "expires_at": kwargs["expires_at"].isoformat() if kwargs["expires_at"] is not None else None,
         }
+
+    async def list_group_names_for_subject(self, subject: str):
+        return list(self.group_names)
 
 
 def _config(*, auth_mode: str, api_key: str = "", bootstrap_admin_api_key: str = "", allow_unauthenticated: bool = False):
@@ -93,6 +97,7 @@ def test_postgres_authenticates_bootstrap_admin_key() -> None:
 def test_postgres_authenticates_database_api_key_and_touches_last_used() -> None:
     api_key, key_prefix, key_hash = generate_api_key()
     store = FakeStore()
+    store.group_names = ["sales"]
     store.identity = {
         "api_key_id": "key-1",
         "key_prefix": key_prefix,
@@ -110,6 +115,7 @@ def test_postgres_authenticates_database_api_key_and_touches_last_used() -> None
     assert principal.user_id == "user-1"
     assert principal.api_key_id == "key-1"
     assert principal.role == "member"
+    assert principal.group_names == ("sales",)
     assert store.touched == ["key-1"]
 
 

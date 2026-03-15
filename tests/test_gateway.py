@@ -196,7 +196,10 @@ def test_http_auth_header_parsing() -> None:
     principal, unauthorized_ok = asyncio.run(server._authenticate(request_ok))
     rejected_principal, unauthorized_bad = asyncio.run(server._authenticate(request_bad))
 
-    assert principal == AuthenticatedPrincipal(subject="gateway", auth_scheme="shared_bearer")
+    assert principal is not None
+    assert principal.subject == "gateway"
+    assert principal.auth_scheme == "shared_bearer"
+    assert principal.role == "admin"
     assert unauthorized_ok is None
     assert rejected_principal is None
     assert unauthorized_bad is not None
@@ -216,7 +219,7 @@ def test_tools_handler_returns_browser_friendly_unauthorized_html() -> None:
 
     assert response.status == 401
     assert response.content_type == "text/html"
-    assert "&lt;api_key&gt;" in response.text
+    assert "&lt;token&gt;" in response.text
     assert response.headers["WWW-Authenticate"] == 'Bearer realm="mcp-gateway"'
 
 
@@ -257,7 +260,7 @@ def test_tools_handler_can_be_public_without_auth() -> None:
     assert "tools" not in payload["upstreams"][0]
 
 
-def test_viewer_role_cannot_open_sse_session() -> None:
+def test_viewer_role_can_reach_authenticated_transport() -> None:
     config = _config_with_upstreams([_upstream()])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
     server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
@@ -269,9 +272,12 @@ def test_viewer_role_cannot_open_sse_session() -> None:
     gateway.auth_required = lambda: True  # type: ignore[method-assign]
     request = SimpleNamespace(headers={"Authorization": "Bearer viewer-key"}, remote="127.0.0.1")
 
-    response = asyncio.run(server.sse_handler(request))
+    request_context, response = asyncio.run(server._preflight_request(request))
 
-    assert response.status == 403
+    assert response is None
+    assert request_context is not None
+    assert request_context.principal is not None
+    assert request_context.principal.role == "viewer"
 
 
 def test_management_endpoints_require_auth_even_when_gateway_allows_unauthenticated() -> None:
@@ -820,10 +826,11 @@ def test_preflight_request_rejects_rate_limited_requests() -> None:
     second_context, response = asyncio.run(server._preflight_request(request))
 
     assert first_response is None
-    assert first_context == RequestContext(
-        client_id="127.0.0.1",
-        principal=AuthenticatedPrincipal(subject="gateway", auth_scheme="shared_bearer"),
-    )
+    assert first_context is not None
+    assert first_context.client_id == "127.0.0.1"
+    assert first_context.principal is not None
+    assert first_context.principal.subject == "gateway"
+    assert first_context.principal.auth_scheme == "shared_bearer"
     assert second_context is None
     assert response is not None
     assert response.status == 429
@@ -902,7 +909,7 @@ def test_viewer_role_cannot_call_tools() -> None:
     )
 
     assert result.success is False
-    assert result.payload["error"]["data"]["category"] == "role_denied"
+    assert result.payload["error"]["data"]["category"] == "policy_denied"
 
 
 def test_admin_users_create_requires_admin_role() -> None:
@@ -1088,6 +1095,67 @@ def test_admin_usage_handler_hides_invalid_timestamp_details() -> None:
     assert logger.warnings[0][1]["field"] == "from"
 
 
+def test_admin_groups_create_handler_allows_admin_api_key() -> None:
+    config = _config_with_upstreams([_upstream("jira")])
+    config.gateway.auth_mode = "postgres_api_keys"
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_authenticate_token(token):
+        return AuthenticatedPrincipal(
+            subject="alice",
+            auth_scheme="postgres_api_key",
+            role="admin",
+            user_id="user-1",
+        )
+
+    async def fake_create_group(*, name: str, description: str | None):
+        assert name == "sales"
+        assert description == "Sales team"
+        return {"id": "group-1", "name": "sales", "description": "Sales team"}
+
+    gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
+    gateway.create_group = fake_create_group  # type: ignore[method-assign]
+
+    response = asyncio.run(
+        server.admin_groups_create_handler(
+            _request(
+                headers={"Authorization": "Bearer admin-key"},
+                body={"name": "sales", "description": "Sales team"},
+            )
+        )
+    )
+
+    assert response.status == 201
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload == {"id": "group-1", "name": "sales", "description": "Sales team"}
+
+
+def test_admin_groups_list_handler_requires_group_read_permission() -> None:
+    config = _config_with_upstreams([_upstream("jira")])
+    config.gateway.auth_mode = "postgres_api_keys"
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_authenticate_token(token):
+        return AuthenticatedPrincipal(
+            subject="bob",
+            auth_scheme="postgres_api_key",
+            group_names=("sales",),
+            role="member",
+            user_id="user-2",
+        )
+
+    gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
+
+    response = asyncio.run(server.admin_groups_list_handler(_request(headers={"Authorization": "Bearer member-key"})))
+
+    assert response.status == 403
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["error"]["data"]["category"] == "policy_denied"
+    assert payload["error"]["data"]["permission"] == "admin.groups.read"
+
+
 def test_message_handler_returns_retryable_error_when_session_queue_is_full() -> None:
     config = _config_with_upstreams([_upstream()])
     config.gateway.sse_queue_max_messages = 1
@@ -1105,10 +1173,10 @@ def test_message_handler_returns_retryable_error_when_session_queue_is_full() ->
         return {"jsonrpc": "2.0", "id": "1", "method": "tools/list", "params": {}}
 
     async def fake_handle(payload, request_context):
-        assert request_context == RequestContext(
-            client_id="127.0.0.1",
-            principal=AuthenticatedPrincipal(subject="gateway", auth_scheme="shared_bearer"),
-        )
+        assert request_context.client_id == "127.0.0.1"
+        assert request_context.principal is not None
+        assert request_context.principal.subject == "gateway"
+        assert request_context.principal.auth_scheme == "shared_bearer"
         return GatewayResult(
             payload={"jsonrpc": "2.0", "id": "1", "result": {"ok": True}},
             success=True,
