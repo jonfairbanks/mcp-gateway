@@ -38,6 +38,22 @@ upstreams:
       - "context7."
 
   ###################
+  # Chrome DevTools #
+  ###################
+
+  - id: "chrome-devtools"
+    name: "chrome-devtools"
+    transport: "stdio"
+    command: "npx"
+    args:
+      - "-y"
+      - "chrome-devtools-mcp@latest"
+      - "--headless"
+      - "--no-usage-statistics"
+    env: {}
+    deny_tools: []
+
+  ###################
   # Endor Labs AURI #
   ###################
 
