@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from mcp_gateway import cli
+from mcp_gateway.logging import Logger
 
 
 class RecordingLogger:
@@ -24,7 +27,7 @@ class RecordingLogger:
 
 def test_validate_runtime_config_requires_explicit_unauthenticated_opt_in() -> None:
     logger = RecordingLogger()
-    config = SimpleNamespace(gateway=SimpleNamespace(api_key="", allow_unauthenticated=False))
+    config = SimpleNamespace(gateway=SimpleNamespace(auth_mode="single_shared", api_key="", allow_unauthenticated=False))
 
     try:
         cli._validate_runtime_config(config, logger)
@@ -39,12 +42,81 @@ def test_validate_runtime_config_requires_explicit_unauthenticated_opt_in() -> N
 
 def test_validate_runtime_config_warns_when_unauthenticated_mode_is_explicit() -> None:
     logger = RecordingLogger()
-    config = SimpleNamespace(gateway=SimpleNamespace(api_key="", allow_unauthenticated=True))
+    config = SimpleNamespace(gateway=SimpleNamespace(auth_mode="single_shared", api_key="", allow_unauthenticated=True))
 
     cli._validate_runtime_config(config, logger)
 
     assert logger.warnings
     assert logger.warnings[0][0] == "authentication_disabled"
+
+
+def test_validate_runtime_config_allows_postgres_auth_mode_without_shared_key() -> None:
+    logger = RecordingLogger()
+    config = SimpleNamespace(gateway=SimpleNamespace(auth_mode="postgres_api_keys", api_key="", allow_unauthenticated=False))
+
+    cli._validate_runtime_config(config, logger)
+
+    assert logger.errors == []
+
+
+def test_validate_database_runtime_requires_database_for_postgres_auth_mode() -> None:
+    logger = RecordingLogger()
+    config = SimpleNamespace(gateway=SimpleNamespace(auth_mode="postgres_api_keys"))
+
+    try:
+        cli._validate_database_runtime(config, logger, "")
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("expected database validation to exit")
+
+    assert logger.errors
+    assert logger.errors[0][0] == "database_required"
+
+
+def test_validate_database_runtime_reports_human_readable_stderr(capsys) -> None:
+    logger = Logger(stdout_json=False)
+    config = SimpleNamespace(gateway=SimpleNamespace(auth_mode="postgres_api_keys"))
+
+    with pytest.raises(SystemExit) as exc:
+        cli._validate_database_runtime(config, logger, "")
+
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert "ERROR: DATABASE_URL not set" in captured.err
+    assert "hint: Set DATABASE_URL or switch gateway.auth_mode to single_shared" in captured.err
+
+
+def test_validate_database_runtime_skips_single_shared_mode() -> None:
+    logger = RecordingLogger()
+    config = SimpleNamespace(gateway=SimpleNamespace(auth_mode="single_shared"))
+
+    cli._validate_database_runtime(config, logger, "")
+
+    assert logger.errors == []
+
+
+def test_run_create_api_key_reports_auth_mode_misconfiguration(monkeypatch, capsys) -> None:
+    config = SimpleNamespace(gateway=SimpleNamespace(auth_mode="single_shared"))
+    monkeypatch.setattr(cli, "load_config", lambda _path: config)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example")
+
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(
+            cli._run_create_api_key(
+                "config.yaml",
+                subject="alice",
+                display_name="Alice",
+                role="admin",
+                key_name="default",
+                expires_days=None,
+            )
+        )
+
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert "ERROR: gateway.auth_mode must be postgres_api_keys" in captured.err
+    assert "hint: Set gateway.auth_mode to postgres_api_keys before issuing database-backed API keys" in captured.err
 
 
 def test_cache_cleanup_loop_runs_and_stops_cleanly(monkeypatch) -> None:

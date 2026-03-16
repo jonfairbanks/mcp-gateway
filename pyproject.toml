@@ -15,6 +15,7 @@ dependencies = [
   "psycopg[binary,pool]>=3.1",
   "orjson>=3.10",
   "prometheus-client>=0.20",
+  "casbin>=1.36",
 ]
 
 [project.optional-dependencies]

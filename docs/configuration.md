@@ -11,12 +11,20 @@ cache:
 upstreams:
 ```
 
+String values support explicit env interpolation:
+
+- `${NAME}` requires the environment variable to be set
+- `${NAME:-default}` uses `default` when the variable is unset or empty
+
 ## `gateway`
 
 - `listen_host` default `0.0.0.0`
 - `listen_port` default `8080`
-- `api_key` bearer token required by gateway HTTP endpoints
-- `allow_unauthenticated` default `false`; when `true`, startup allows an empty `api_key` and logs a warning
+- `auth_mode` default `single_shared`; supported values are `single_shared` and `postgres_api_keys`
+- `api_key` bearer token used in `single_shared` mode
+- `bootstrap_admin_api_key` optional break-glass admin token for `postgres_api_keys` mode
+- `allow_unauthenticated` default `false`; when `true`, MCP execution routes may be open, but the `/v1/me` and `/v1/admin/*` management APIs still require a valid bearer token
+- `public_tools_catalog` default `false`; when `true`, `GET /tools` skips auth but still uses rate limiting
 - `trusted_proxies` default `["127.0.0.1", "::1"]`
   - `X-Forwarded-For` and `X-Client-Id` headers are only trusted when `request.remote` is in this list.
 - `request_max_bytes` default `2097152` (2 MB)
@@ -39,6 +47,40 @@ upstreams:
 - `client_scoped_tools` default `[]`
 
 `client_scoped_tools` means cache keys for listed tools include `client_id` so users do not share cached results.
+
+## Management APIs
+
+When `gateway.auth_mode` is `postgres_api_keys`, the gateway exposes:
+
+- `GET /v1/me`
+- `GET /v1/me/api-keys`
+- `POST /v1/me/api-keys`
+- `DELETE /v1/me/api-keys/{key_id}`
+- `GET /v1/admin/identities`
+- `PUT /v1/admin/identities/{subject}`
+- `PATCH /v1/admin/identities/{subject}`
+- `GET /v1/admin/users`
+- `POST /v1/admin/users`
+- `PATCH /v1/admin/users/{user_id}`
+- `GET /v1/admin/integrations`
+- `GET /v1/admin/groups`
+- `POST /v1/admin/groups`
+- `PATCH /v1/admin/groups/{group_id}`
+- `DELETE /v1/admin/groups/{group_id}`
+- `POST /v1/admin/groups/{group_id}/members`
+- `DELETE /v1/admin/groups/{group_id}/members/{subject}`
+- `GET /v1/admin/groups/{group_id}/integration-grants`
+- `POST /v1/admin/groups/{group_id}/integration-grants`
+- `DELETE /v1/admin/groups/{group_id}/integration-grants/{upstream_id}`
+- `GET /v1/admin/groups/{group_id}/platform-grants`
+- `POST /v1/admin/groups/{group_id}/platform-grants`
+- `DELETE /v1/admin/groups/{group_id}/platform-grants/{permission}`
+- `GET /v1/admin/usage`
+
+Role behavior:
+
+- `admin`: full MCP access plus user management, RBAC management, usage reporting, and API key management
+- standard users: no built-in integration grants; self-service API key management remains available, but tool execution and delegated admin access come from PyCasbin group memberships plus integration or platform grants
 
 ## `upstreams[]`
 
@@ -79,8 +121,11 @@ Common:
 gateway:
   listen_host: "0.0.0.0"
   listen_port: 8080
-  api_key: "change-me"
+  auth_mode: "single_shared"
+  api_key: "${MCP_GATEWAY_API_KEY:-change-me}"
+  bootstrap_admin_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY:-}"
   allow_unauthenticated: false
+  public_tools_catalog: false
   sse_queue_max_messages: 100
   max_sse_sessions: 1000
 
@@ -101,6 +146,17 @@ upstreams:
     args:
       - "-y"
       - "@upstash/context7-mcp"
+    deny_tools: []
+
+  - id: "chrome-devtools"
+    transport: "stdio"
+    command: "npx"
+    args:
+      - "-y"
+      - "chrome-devtools-mcp@latest"
+      - "--slim"
+      - "--headless"
+      - "--no-usage-statistics"
     deny_tools: []
 
   - id: "notion-sse"

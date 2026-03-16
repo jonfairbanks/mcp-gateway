@@ -11,8 +11,8 @@ RUN pip install --no-cache-dir .
 
 COPY config.example.yaml schema.sql /app/
 
-RUN groupadd --system --gid 10001 app && \
-    useradd --system --uid 10001 --gid app --create-home app && \
+RUN groupadd --gid 10001 app && \
+    useradd --uid 10001 --gid app --create-home --shell /usr/sbin/nologin app && \
     chown -R app:app /app
 
 USER app:app

@@ -1,0 +1,249 @@
+# RBAC Onboarding
+
+This document explains how to set up access control for `mcp-gateway` when `gateway.auth_mode` is `postgres_api_keys`.
+
+## Model
+
+Authentication is API-key based.
+Authorization is handled by PyCasbin using groups, integration grants, and platform grants.
+
+The high-level rules are:
+
+- `admin` users keep full built-in MCP and admin access.
+- standard users authenticate successfully, but do not get built-in integration or admin access.
+- Non-admin access comes from group memberships and grants stored in Postgres.
+- Tool discovery remains unfiltered. A user can still see tools in `GET /tools` or `tools/list`.
+- Authorization is enforced on `tools/call`.
+- Per-upstream `deny_tools` still overrides an otherwise allowed integration grant.
+
+In practice, the model is:
+
+- user -> API key
+- user subject -> one or more groups
+- group -> one or more integration grants
+- group -> zero or more platform grants
+
+## Roles vs Groups
+
+Only one built-in role remains:
+
+- `admin`
+
+Every other managed user is a standard user with `role = null`.
+Groups are the main access-control unit for non-admin users. Examples:
+
+- `sales` -> can use `jira`
+- `developers` -> can use `jira`, `github`, `aws`, `context7`, `notion`
+- `ops-observers` -> can read usage reports but cannot change groups
+
+Reserved group names cannot be created or edited:
+
+- `legacy_admin`
+
+## Grant Types
+
+### Integration grants
+
+Integration grants are upstream-level permissions.
+The grant target is the upstream `id` from `config.yaml`, not an individual tool name.
+
+Examples:
+
+- `jira`
+- `github`
+- `aws`
+- `context7`
+- `notion`
+
+If a group has an integration grant for `jira`, members of that group can call tools routed to the `jira` upstream.
+
+### Platform grants
+
+Platform grants control access to management APIs.
+
+Supported platform permissions are:
+
+- `admin.identities.read`
+- `admin.identities.write`
+- `admin.groups.read`
+- `admin.groups.write`
+- `admin.usage.read`
+
+These are useful when you want a non-admin operator to manage some parts of the system without giving them full admin access.
+
+## Bootstrap Flow
+
+Use this order on a fresh deployment:
+
+1. Apply the schema.
+2. Run the gateway in `postgres_api_keys` mode.
+3. Create or use an admin API key.
+4. List configured integrations.
+5. Create a group.
+6. Create a managed user and issue their first API key.
+7. Add that user's subject to the group.
+8. Grant one or more integrations to the group.
+9. Test with that user's API key.
+
+## Example: Sales Can Only Use Jira
+
+Assume:
+
+- gateway base URL is `http://localhost:8080`
+- you already have an admin token in `ADMIN_TOKEN`
+
+List valid integration ids:
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://localhost:8080/v1/admin/integrations
+```
+
+Create the `sales` group:
+
+```bash
+curl -X POST http://localhost:8080/v1/admin/groups \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"sales","description":"Sales team"}'
+```
+
+Create a non-admin user and issue their first API key:
+
+```bash
+curl -X POST http://localhost:8080/v1/admin/users \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"subject":"alice","display_name":"Alice","issue_api_key":true,"key_label":"default"}'
+```
+
+Add the user to the group:
+
+```bash
+curl -X POST http://localhost:8080/v1/admin/groups/$GROUP_ID/members \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"subject":"alice"}'
+```
+
+Grant Jira to the group:
+
+```bash
+curl -X POST http://localhost:8080/v1/admin/groups/$GROUP_ID/integration-grants \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"upstream_id":"jira"}'
+```
+
+Now `alice` should:
+
+- authenticate successfully with the issued API key
+- see tools in discovery
+- be allowed to call Jira tools
+- be denied on tools routed to non-Jira integrations
+
+## Example: Developers Can Use Multiple Integrations
+
+You can model a broader engineering group by attaching several integration grants to the same group:
+
+- `jira`
+- `github`
+- `aws`
+- `context7`
+- `notion`
+
+The flow is the same:
+
+1. create a `developers` group
+2. add one or more subjects to that group
+3. add one integration grant per upstream
+
+This keeps the access model simple and avoids hard-coding permissions into roles.
+
+## Optional: Delegated Admin Access
+
+If you want a non-admin group to manage parts of the gateway, add platform grants to that group.
+
+Examples:
+
+- `admin.groups.read` lets a group list groups and grants
+- `admin.groups.write` lets a group create, update, and delete groups and grants
+- `admin.usage.read` lets a group query usage summaries
+
+Example request:
+
+```bash
+curl -X POST http://localhost:8080/v1/admin/groups/$GROUP_ID/platform-grants \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"permission":"admin.usage.read"}'
+```
+
+## Testing
+
+Useful checks during onboarding:
+
+### Confirm the principal
+
+```bash
+curl -H "Authorization: Bearer $USER_TOKEN" \
+  http://localhost:8080/v1/me
+```
+
+This should show the user's subject, role, auth scheme, and group names.
+
+### Confirm discovery still works
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer $USER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}'
+```
+
+### Confirm execution is enforced
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Authorization: Bearer $USER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":"2","method":"tools/call","params":{"name":"some.tool","arguments":{}}}'
+```
+
+If the tool is not allowed, the gateway returns a JSON-RPC error with:
+
+- code `-32001`
+- `error.data.category = "policy_denied"`
+
+## Common Pitfalls
+
+- A standard user with no group grants can authenticate but still cannot call tools.
+- Integration grants use upstream ids, not tool names.
+- `GET /tools` and `tools/list` are not an authorization test; `tools/call` is.
+- `deny_tools` in upstream config can still block specific tools even when the group has the upstream grant.
+- If `/v1/admin/groups` is empty after applying the schema, that is normal. No groups are seeded automatically.
+
+## Postman
+
+The repo includes a ready-to-import Postman collection:
+
+- [`docs/postman/mcp-gateway.postman_collection.json`](docs/postman/mcp-gateway.postman_collection.json)
+
+Set:
+
+- `base_url`
+- `admin_token`
+
+The collection can then auto-populate:
+
+- `group_id`
+- `user_id`
+- `subject`
+- `key_id`
+- `user_token`
+
+## Related Files
+
+- Configuration reference: [`docs/configuration.md`](configuration.md)
+- Postman collection: [`docs/postman/mcp-gateway.postman_collection.json`](postman/mcp-gateway.postman_collection.json)
+- Database schema: [`schema.sql`](../schema.sql)

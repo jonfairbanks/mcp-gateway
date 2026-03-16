@@ -17,6 +17,12 @@ class UpstreamResponse:
     success: bool
 
 
+@dataclass
+class SseEvent:
+    event: str
+    data: str
+
+
 class HTTPUpstream:
     def __init__(
         self,
@@ -104,18 +110,25 @@ class HTTPUpstream:
                     try:
                         data = json.loads(raw_text)
                     except json.JSONDecodeError:
-                        return UpstreamResponse(
-                            payload={
-                                "jsonrpc": "2.0",
-                                "id": payload.get("id"),
-                                "error": {
-                                    "code": -32003,
-                                    "message": f"HTTP upstream returned non-JSON body (status {resp.status})",
-                                    "data": {"body": raw_text[:500]},
+                        sse_payload = self._extract_sse_payload(raw_text, expected_id=payload.get("id"))
+                        if sse_payload is not None:
+                            data = sse_payload
+                        else:
+                            message = f"HTTP upstream returned non-JSON body (status {resp.status})"
+                            if self._looks_like_sse(raw_text):
+                                message = f"HTTP upstream returned SSE body without matching JSON-RPC response (status {resp.status})"
+                            return UpstreamResponse(
+                                payload={
+                                    "jsonrpc": "2.0",
+                                    "id": payload.get("id"),
+                                    "error": {
+                                        "code": -32003,
+                                        "message": message,
+                                        "data": {"body": raw_text[:500]},
+                                    },
                                 },
-                            },
-                            success=False,
-                        )
+                                success=False,
+                            )
                 else:
                     data = {"jsonrpc": "2.0", "id": payload.get("id"), "result": {}}
 
@@ -143,6 +156,63 @@ class HTTPUpstream:
                     body = await resp.text()
                     raise RuntimeError(f"HTTP upstream notify failed status {resp.status}: {body[:300]}")
                 await resp.read()
+
+    @staticmethod
+    def _looks_like_sse(raw_text: str) -> bool:
+        stripped = raw_text.lstrip()
+        return stripped.startswith("event:") or stripped.startswith("data:") or "\nevent:" in raw_text or "\ndata:" in raw_text
+
+    @staticmethod
+    def _parse_sse_events(raw_text: str) -> list[SseEvent]:
+        events: list[SseEvent] = []
+        event_name = "message"
+        data_lines: list[str] = []
+        saw_field = False
+
+        for line in raw_text.splitlines():
+            if not line:
+                if saw_field:
+                    events.append(SseEvent(event=event_name, data="\n".join(data_lines)))
+                event_name = "message"
+                data_lines = []
+                saw_field = False
+                continue
+            if line.startswith(":"):
+                continue
+            field, separator, value = line.partition(":")
+            if not separator:
+                continue
+            if value.startswith(" "):
+                value = value[1:]
+            saw_field = True
+            if field == "event":
+                event_name = value or "message"
+            elif field == "data":
+                data_lines.append(value)
+
+        if saw_field:
+            events.append(SseEvent(event=event_name, data="\n".join(data_lines)))
+        return events
+
+    @classmethod
+    def _extract_sse_payload(cls, raw_text: str, expected_id: Any) -> Optional[Dict[str, Any]]:
+        candidate: Optional[Dict[str, Any]] = None
+        for event in cls._parse_sse_events(raw_text):
+            if not event.data:
+                continue
+            try:
+                decoded = json.loads(event.data)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(decoded, dict):
+                continue
+            if decoded.get("id") == expected_id:
+                return decoded
+            if candidate is None and ("result" in decoded or "error" in decoded):
+                candidate = decoded
+        if expected_id is None:
+            return candidate
+        return None
 
 
 class StdioUpstream:

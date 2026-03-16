@@ -1,17 +1,34 @@
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import yaml
+
+ENV_REF_PATTERN = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::-(?P<default>[^}]*))?\}")
+ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+AUTH_MODE_SINGLE_SHARED = "single_shared"
+AUTH_MODE_POSTGRES_API_KEYS = "postgres_api_keys"
+VALID_AUTH_MODES = frozenset(
+    {
+        AUTH_MODE_SINGLE_SHARED,
+        AUTH_MODE_POSTGRES_API_KEYS,
+    }
+)
 
 
 @dataclass
 class GatewayConfig:
     listen_host: str
     listen_port: int
+    auth_mode: str
     api_key: str
+    bootstrap_admin_api_key: str
     allow_unauthenticated: bool
+    public_tools_catalog: bool
     trusted_proxies: List[str]
     request_max_bytes: int
     rate_limit_per_minute: int
@@ -22,11 +39,17 @@ class GatewayConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
+        auth_mode = str(_get(data, "auth_mode", AUTH_MODE_SINGLE_SHARED))
+        if auth_mode not in VALID_AUTH_MODES:
+            raise ValueError("gateway.auth_mode must be one of: single_shared, postgres_api_keys")
         return cls(
             listen_host=_get(data, "listen_host", "0.0.0.0"),
             listen_port=int(_get(data, "listen_port", 8080)),
+            auth_mode=auth_mode,
             api_key=_get(data, "api_key", ""),
+            bootstrap_admin_api_key=_get(data, "bootstrap_admin_api_key", ""),
             allow_unauthenticated=bool(_get(data, "allow_unauthenticated", False)),
+            public_tools_catalog=bool(_get(data, "public_tools_catalog", False)),
             trusted_proxies=[str(proxy) for proxy in list(_get(data, "trusted_proxies", ["127.0.0.1", "::1"]))],
             request_max_bytes=int(_get(data, "request_max_bytes", 2 * 1024 * 1024)),
             rate_limit_per_minute=int(_get(data, "rate_limit_per_minute", 120)),
@@ -90,13 +113,16 @@ class UpstreamConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "UpstreamConfig":
+        upstream_id = data["id"]
+        bearer_token_env_var = data.get("bearer_token_env_var")
+        _validate_env_var_name(bearer_token_env_var, f"upstreams[{upstream_id}].bearer_token_env_var")
         return cls(
-            id=data["id"],
-            name=data.get("name", data["id"]),
+            id=upstream_id,
+            name=data.get("name", upstream_id),
             transport=data["transport"],
             endpoint=data.get("endpoint"),
             http_headers={str(key): str(value) for key, value in (data.get("http_headers", {}) or {}).items()},
-            bearer_token_env_var=data.get("bearer_token_env_var"),
+            bearer_token_env_var=bearer_token_env_var,
             http_serialize_requests=bool(data.get("http_serialize_requests", False)),
             command=_normalize_stdio_command(data),
             env={str(key): str(value) for key, value in (data.get("env", {}) or {}).items()},
@@ -142,6 +168,13 @@ def _optional_int(value: Any) -> Optional[int]:
     return int(value)
 
 
+def _validate_env_var_name(value: Any, path: str) -> None:
+    if value in (None, ""):
+        return
+    if not isinstance(value, str) or not ENV_NAME_PATTERN.fullmatch(value):
+        raise ValueError(f"Invalid environment variable name for '{path}': {value!r}")
+
+
 def _normalize_stdio_command(item: Dict[str, Any]) -> Optional[List[str]]:
     command_raw = item.get("command")
     args_raw = item.get("args", []) or []
@@ -164,7 +197,32 @@ def _normalize_stdio_command(item: Dict[str, Any]) -> Optional[List[str]]:
     return command
 
 
+def _expand_env_string(value: str, path: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        name = match.group("name")
+        default = match.group("default")
+        env_value = os.getenv(name)
+        if default is not None:
+            return env_value if env_value not in (None, "") else default
+        if env_value is None:
+            raise ValueError(f"Missing required environment variable '{name}' for config value '{path}'")
+        return env_value
+
+    return ENV_REF_PATTERN.sub(replace, value)
+
+
+def _expand_env_refs(value: Any, path: str = "config") -> Any:
+    if isinstance(value, dict):
+        return {key: _expand_env_refs(item, f"{path}.{key}") for key, item in value.items()}
+    if isinstance(value, list):
+        return [_expand_env_refs(item, f"{path}[{index}]") for index, item in enumerate(value)]
+    if isinstance(value, str):
+        # Only expand explicit ${...} markers so ordinary strings remain literal.
+        return _expand_env_string(value, path)
+    return value
+
+
 def load_config(path: str) -> AppConfig:
     with open(path, "r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
-    return AppConfig.from_dict(raw)
+    return AppConfig.from_dict(_expand_env_refs(raw))

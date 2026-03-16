@@ -1,8 +1,11 @@
 gateway:
   listen_host: "0.0.0.0"
   listen_port: 8080
-  api_key: "change-me"
+  auth_mode: "single_shared"
+  api_key: "${MCP_GATEWAY_API_KEY:-change-me}"
+  bootstrap_admin_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY:-}"
   allow_unauthenticated: false
+  public_tools_catalog: false
   rate_limit_per_minute: 120
   sse_queue_max_messages: 100
   max_sse_sessions: 1000
@@ -35,6 +38,22 @@ upstreams:
       - "context7."
 
   ###################
+  # Chrome DevTools #
+  ###################
+
+  - id: "chrome-devtools"
+    name: "chrome-devtools"
+    transport: "stdio"
+    command: "npx"
+    args:
+      - "-y"
+      - "chrome-devtools-mcp@latest"
+      - "--headless"
+      - "--no-usage-statistics"
+    env: {}
+    deny_tools: []
+
+  ###################
   # Endor Labs AURI #
   ###################
 
@@ -65,7 +84,7 @@ upstreams:
       - "-y"
       - "@notionhq/notion-mcp-server"
     env:
-      NOTION_TOKEN: "ntn_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      NOTION_TOKEN: "${NOTION_TOKEN:-ntn_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}"
     deny_tools:
       - "API-post-page"
       - "API-patch-page"
@@ -96,3 +115,31 @@ upstreams:
     deny_tools: []
     tool_routes:
       - "aws."
+
+  ###########
+  # Grafana #
+  ###########
+
+  - id: "grafana"
+    name: "grafana"
+    transport: "stdio"
+    command: "uvx"
+    args:
+      - "mcp-grafana"
+    env:
+      GRAFANA_URL: "${GRAFANA_URL:-http://localhost:3000}"
+      GRAFANA_SERVICE_ACCOUNT_TOKEN: "${GRAFANA_SERVICE_ACCOUNT_TOKEN:-<your service account token>}"
+    timeout_ms: 180000
+    deny_tools: []
+
+  ##########
+  # GitHub #
+  ##########
+
+  - id: "github"
+    name: "github"
+    transport: "http_sse"
+    endpoint: "https://api.githubcopilot.com/mcp/"
+    bearer_token_env_var: "GITHUB_PAT_TOKEN"
+    timeout_ms: 30000
+    deny_tools: []
