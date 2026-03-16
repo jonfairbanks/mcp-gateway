@@ -80,8 +80,7 @@ When `gateway.auth_mode` is `postgres_api_keys`, the gateway exposes:
 Role behavior:
 
 - `admin`: full MCP access plus user management, RBAC management, usage reporting, and API key management
-- `member`: no built-in integration grants; self-service API key management remains available, but tool execution comes from PyCasbin group memberships and integration grants
-- `viewer`: no built-in integration grants; discovery still works, and tool execution comes from PyCasbin group memberships and integration grants
+- standard users: no built-in integration grants; self-service API key management remains available, but tool execution and delegated admin access come from PyCasbin group memberships plus integration or platform grants
 
 ## `upstreams[]`
 
@@ -147,6 +146,17 @@ upstreams:
     args:
       - "-y"
       - "@upstash/context7-mcp"
+    deny_tools: []
+
+  - id: "chrome-devtools"
+    transport: "stdio"
+    command: "npx"
+    args:
+      - "-y"
+      - "chrome-devtools-mcp@latest"
+      - "--slim"
+      - "--headless"
+      - "--no-usage-statistics"
     deny_tools: []
 
   - id: "notion-sse"

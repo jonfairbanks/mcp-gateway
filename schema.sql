@@ -71,6 +71,7 @@ ALTER TABLE gateway_users ADD COLUMN IF NOT EXISTS email TEXT;
 ALTER TABLE gateway_users ADD COLUMN IF NOT EXISTS auth_source TEXT;
 ALTER TABLE gateway_users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
 ALTER TABLE gateway_users ALTER COLUMN role DROP NOT NULL;
+UPDATE gateway_users SET role = NULL WHERE role IN ('member', 'viewer');
 
 CREATE TABLE IF NOT EXISTS gateway_api_keys (
   id UUID PRIMARY KEY,

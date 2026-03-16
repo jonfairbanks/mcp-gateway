@@ -402,7 +402,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"subject\": \"{{subject}}\",\n  \"display_name\": \"Alice\",\n  \"role\": \"member\",\n  \"issue_api_key\": true,\n  \"key_label\": \"default\"\n}"
+              "raw": "{\n  \"subject\": \"{{subject}}\",\n  \"display_name\": \"Alice\",\n  \"issue_api_key\": true,\n  \"key_label\": \"default\"\n}"
             },
             "url": "{{base_url}}/v1/admin/users",
             "description": "Creates a managed user. With `issue_api_key: true`, the returned plaintext API key is stored into `user_token`."
@@ -420,7 +420,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"display_name\": \"Alice Updated\",\n  \"role\": \"viewer\",\n  \"is_active\": true\n}"
+              "raw": "{\n  \"display_name\": \"Alice Updated\",\n  \"role\": null,\n  \"is_active\": true\n}"
             },
             "url": "{{base_url}}/v1/admin/users/{{user_id}}",
             "description": "Set `user_id` from the create/list response."

@@ -533,15 +533,17 @@ class HttpServer:
             return self._rest_error(400, "InvalidRequest", "subject must be a non-empty string.")
         if display_name is not None and (not isinstance(display_name, str) or not display_name.strip()):
             return self._rest_error(400, "InvalidRequest", "display_name must be a non-empty string when provided.")
-        if not isinstance(role, str) or not role.strip():
-            return self._rest_error(400, "InvalidRequest", "role must be a non-empty string.")
-        normalized_role = self._normalize_role(role)
-        if normalized_role is None:
-            return self._invalid_request_response(
-                "/v1/admin/users",
-                "role must be one of: admin, member, viewer",
-                field="role",
-            )
+        normalized_role = None
+        if role is not None:
+            if not isinstance(role, str) or not role.strip():
+                return self._rest_error(400, "InvalidRequest", "role must be a non-empty string when provided.")
+            normalized_role = self._normalize_role(role)
+            if normalized_role is None:
+                return self._invalid_request_response(
+                    "/v1/admin/users",
+                    "role, when provided, must be admin",
+                    field="role",
+                )
         if not isinstance(issue_api_key, bool):
             return self._rest_error(400, "InvalidRequest", "issue_api_key must be a boolean.")
         if not isinstance(key_label, str) or not key_label.strip():
@@ -599,30 +601,32 @@ class HttpServer:
             return invalid_body
         assert body is not None
         display_name = body.get("display_name")
+        role_present = "role" in body
         role = body.get("role")
         is_active = body.get("is_active")
         if display_name is not None and (not isinstance(display_name, str) or not display_name.strip()):
             return self._rest_error(400, "InvalidRequest", "display_name must be a non-empty string when provided.")
-        if role is not None and (not isinstance(role, str) or not role.strip()):
-            return self._rest_error(400, "InvalidRequest", "role must be a non-empty string when provided.")
         normalized_role = None
-        if role is not None:
+        if role_present and role is not None:
+            if not isinstance(role, str) or not role.strip():
+                return self._rest_error(400, "InvalidRequest", "role must be a non-empty string when provided.")
             normalized_role = self._normalize_role(role)
             if normalized_role is None:
                 return self._invalid_request_response(
                     "/v1/admin/users",
-                    "role must be one of: admin, member, viewer",
+                    "role, when provided, must be admin",
                     field="role",
                 )
         if is_active is not None and not isinstance(is_active, bool):
             return self._rest_error(400, "InvalidRequest", "is_active must be a boolean when provided.")
-        if display_name is None and role is None and is_active is None:
+        if display_name is None and not role_present and is_active is None:
             return self._rest_error(400, "InvalidRequest", "At least one updatable field is required.")
         try:
             user = await self._gateway.update_user(
                 user_id,
                 display_name=display_name,
                 role=normalized_role,
+                role_provided=role_present,
                 is_active=is_active,
             )
         except ValueError as exc:

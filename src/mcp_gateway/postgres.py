@@ -10,6 +10,13 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 
+def _sanitize_role(role: Any) -> Optional[str]:
+    if not isinstance(role, str):
+        return None
+    normalized = role.strip().lower()
+    return "admin" if normalized == "admin" else None
+
+
 class PostgresStore:
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
@@ -226,7 +233,7 @@ class PostgresStore:
             "id": str(row["id"]),
             "subject": row["subject"],
             "display_name": row.get("display_name"),
-            "role": row.get("role"),
+            "role": _sanitize_role(row.get("role")),
             "issuer": row.get("issuer"),
             "email": row.get("email"),
             "auth_source": row.get("auth_source"),
@@ -365,7 +372,7 @@ class PostgresStore:
             row = await cur.fetchone()
             return self._serialize_user_row(row) if row else None
 
-    async def create_user(self, *, subject: str, display_name: str, role: str) -> Optional[Dict[str, Any]]:
+    async def create_user(self, *, subject: str, display_name: str, role: Optional[str]) -> Optional[Dict[str, Any]]:
         if not self._pool:
             raise RuntimeError("Postgres is not available")
         async with self._pool.connection() as conn:
@@ -401,6 +408,7 @@ class PostgresStore:
         *,
         display_name: Optional[str] = None,
         role: Optional[str] = None,
+        role_provided: bool = False,
         is_active: Optional[bool] = None,
     ) -> Optional[Dict[str, Any]]:
         if not self._pool:
@@ -411,13 +419,13 @@ class PostgresStore:
                 UPDATE gateway_users
                 SET
                     display_name = COALESCE(%s, display_name),
-                    role = COALESCE(%s, role),
+                    role = CASE WHEN %s THEN %s ELSE role END,
                     is_active = COALESCE(%s, is_active),
                     updated_at = now()
                 WHERE id = %s
                 RETURNING id, subject, display_name, role, issuer, email, auth_source, is_active, last_seen_at, created_at, updated_at
                 """,
-                (display_name, role, is_active, user_id),
+                (display_name, role_provided, role, is_active, user_id),
             )
             row = await cur.fetchone()
             return self._serialize_user_row(row) if row else None
@@ -968,7 +976,7 @@ class PostgresStore:
         user_id: UUID,
         subject: str,
         display_name: str,
-        role: str,
+        role: Optional[str],
         api_key_id: UUID,
         key_name: str,
         key_prefix: str,
@@ -1012,7 +1020,7 @@ class PostgresStore:
                 "user_id": str(user_row["id"]),
                 "subject": user_row["subject"],
                 "display_name": user_row["display_name"],
-                "role": user_row["role"],
+                "role": _sanitize_role(user_row.get("role")),
                 "api_key_id": str(api_key_id),
                 "key_name": key_name,
                 "expires_at": expires_at.isoformat() if expires_at is not None else None,

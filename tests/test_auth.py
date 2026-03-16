@@ -114,7 +114,7 @@ def test_postgres_authenticates_database_api_key_and_touches_last_used() -> None
     assert principal is not None
     assert principal.user_id == "user-1"
     assert principal.api_key_id == "key-1"
-    assert principal.role == "member"
+    assert principal.role is None
     assert principal.group_names == ("sales",)
     assert store.touched == ["key-1"]
 
@@ -127,7 +127,7 @@ def test_issue_api_key_generates_hash_and_prefix_without_storing_plaintext() -> 
         auth.issue_api_key(
             subject="alice",
             display_name="Alice",
-            role="member",
+            role=None,
             key_name="default",
             expires_days=7,
         )
@@ -136,7 +136,7 @@ def test_issue_api_key_generates_hash_and_prefix_without_storing_plaintext() -> 
     assert issued["api_key"].startswith("mgw_")
     assert store.issued is not None
     assert store.issued["subject"] == "alice"
-    assert store.issued["role"] == "member"
+    assert store.issued["role"] is None
     assert store.issued["key_prefix"] == extract_api_key_prefix(issued["api_key"])
     assert store.issued["key_hash"] == hash_api_key(issued["api_key"])
 
@@ -144,7 +144,7 @@ def test_issue_api_key_generates_hash_and_prefix_without_storing_plaintext() -> 
 def test_issue_api_key_rejects_unknown_role() -> None:
     auth = AuthService(_config(auth_mode=AUTH_MODE_POSTGRES_API_KEYS), FakeStore(), Logger(stdout_json=False))
 
-    with pytest.raises(ValueError, match="role must be one of"):
+    with pytest.raises(ValueError, match="must be admin"):
         asyncio.run(
             auth.issue_api_key(
                 subject="alice",

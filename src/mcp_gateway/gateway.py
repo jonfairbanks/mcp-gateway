@@ -124,7 +124,7 @@ class Gateway:
     async def list_users(self) -> list[Dict[str, Any]]:
         return await self._auth.list_users()
 
-    async def create_user(self, *, subject: str, display_name: Optional[str], role: str) -> Optional[Dict[str, Any]]:
+    async def create_user(self, *, subject: str, display_name: Optional[str], role: Optional[str]) -> Optional[Dict[str, Any]]:
         return await self._auth.create_user(subject=subject, display_name=display_name, role=role)
 
     async def update_user(
@@ -133,9 +133,16 @@ class Gateway:
         *,
         display_name: Optional[str] = None,
         role: Optional[str] = None,
+        role_provided: bool = False,
         is_active: Optional[bool] = None,
     ) -> Optional[Dict[str, Any]]:
-        return await self._auth.update_user(user_id, display_name=display_name, role=role, is_active=is_active)
+        return await self._auth.update_user(
+            user_id,
+            display_name=display_name,
+            role=role,
+            role_provided=role_provided,
+            is_active=is_active,
+        )
 
     async def list_api_keys(self, *, user_id: str) -> list[Dict[str, Any]]:
         return await self._auth.list_api_keys(user_id=user_id)

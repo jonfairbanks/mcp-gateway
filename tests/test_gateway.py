@@ -260,24 +260,24 @@ def test_tools_handler_can_be_public_without_auth() -> None:
     assert "tools" not in payload["upstreams"][0]
 
 
-def test_viewer_role_can_reach_authenticated_transport() -> None:
+def test_standard_user_can_reach_authenticated_transport() -> None:
     config = _config_with_upstreams([_upstream()])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
     server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
 
     async def fake_authenticate_token(token):
-        return AuthenticatedPrincipal(subject="viewer", auth_scheme="postgres_api_key", role="viewer")
+        return AuthenticatedPrincipal(subject="alice", auth_scheme="postgres_api_key")
 
     gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
     gateway.auth_required = lambda: True  # type: ignore[method-assign]
-    request = SimpleNamespace(headers={"Authorization": "Bearer viewer-key"}, remote="127.0.0.1")
+    request = SimpleNamespace(headers={"Authorization": "Bearer user-key"}, remote="127.0.0.1")
 
     request_context, response = asyncio.run(server._preflight_request(request))
 
     assert response is None
     assert request_context is not None
     assert request_context.principal is not None
-    assert request_context.principal.role == "viewer"
+    assert request_context.principal.role is None
 
 
 def test_management_endpoints_require_auth_even_when_gateway_allows_unauthenticated() -> None:
@@ -345,7 +345,6 @@ def test_my_api_keys_handlers_list_and_create_keys() -> None:
         return AuthenticatedPrincipal(
             subject="alice",
             auth_scheme="postgres_api_key",
-            role="member",
             user_id="user-1",
             api_key_id="key-1",
         )
@@ -364,11 +363,11 @@ def test_my_api_keys_handlers_list_and_create_keys() -> None:
     gateway.list_api_keys = fake_list_api_keys  # type: ignore[method-assign]
     gateway.issue_api_key_for_user = fake_issue_api_key_for_user  # type: ignore[method-assign]
 
-    list_response = asyncio.run(server.my_api_keys_list_handler(_request(headers={"Authorization": "Bearer member-key"})))
+    list_response = asyncio.run(server.my_api_keys_list_handler(_request(headers={"Authorization": "Bearer user-key"})))
     create_response = asyncio.run(
         server.my_api_keys_create_handler(
             _request(
-                headers={"Authorization": "Bearer member-key"},
+                headers={"Authorization": "Bearer user-key"},
                 body={"label": "laptop", "expires_at": "2026-03-20T12:00:00Z"},
             )
         )
@@ -391,7 +390,6 @@ def test_my_api_keys_create_handler_hides_validation_error_details() -> None:
         return AuthenticatedPrincipal(
             subject="alice",
             auth_scheme="postgres_api_key",
-            role="member",
             user_id="user-1",
             api_key_id="key-1",
         )
@@ -405,7 +403,7 @@ def test_my_api_keys_create_handler_hides_validation_error_details() -> None:
     response = asyncio.run(
         server.my_api_keys_create_handler(
             _request(
-                headers={"Authorization": "Bearer member-key"},
+                headers={"Authorization": "Bearer user-key"},
                 body={"label": "laptop"},
             )
         )
@@ -882,15 +880,14 @@ def test_sse_handler_rejects_when_session_capacity_is_exceeded() -> None:
     assert response.status == 503
 
 
-def test_viewer_role_cannot_call_tools() -> None:
+def test_standard_user_cannot_call_tools_without_grants() -> None:
     config = _config_with_upstreams([_upstream()])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
     request_context = RequestContext(
         client_id="client-1",
         principal=AuthenticatedPrincipal(
-            subject="viewer",
+            subject="alice",
             auth_scheme="postgres_api_key",
-            role="viewer",
             user_id="user-1",
             api_key_id="key-1",
         ),
@@ -922,7 +919,6 @@ def test_admin_users_create_requires_admin_role() -> None:
         return AuthenticatedPrincipal(
             subject="alice",
             auth_scheme="postgres_api_key",
-            role="member",
             user_id="user-1",
             api_key_id="key-1",
         )
@@ -932,8 +928,8 @@ def test_admin_users_create_requires_admin_role() -> None:
     response = asyncio.run(
         server.admin_users_create_handler(
             _request(
-                headers={"Authorization": "Bearer member-key"},
-                body={"subject": "bob", "display_name": "Bob", "role": "viewer"},
+                headers={"Authorization": "Bearer user-key"},
+                body={"subject": "bob", "display_name": "Bob"},
             )
         )
     )
@@ -956,7 +952,7 @@ def test_admin_users_create_returns_conflict_for_existing_subject() -> None:
             api_key_id="key-1",
         )
 
-    async def fake_create_user(*, subject: str, display_name: str | None, role: str):
+    async def fake_create_user(*, subject: str, display_name: str | None, role: str | None):
         assert subject == "jonfairbanks"
         return None
 
@@ -975,7 +971,7 @@ def test_admin_users_create_returns_conflict_for_existing_subject() -> None:
     assert response.status == 409
 
 
-def test_admin_users_create_normalizes_role_before_call() -> None:
+def test_admin_users_create_normalizes_admin_role_before_call() -> None:
     config = _config_with_upstreams([_upstream()])
     config.gateway.auth_mode = "postgres_api_keys"
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
@@ -990,10 +986,10 @@ def test_admin_users_create_normalizes_role_before_call() -> None:
             api_key_id="key-1",
         )
 
-    async def fake_create_user(*, subject: str, display_name: str | None, role: str):
+    async def fake_create_user(*, subject: str, display_name: str | None, role: str | None):
         assert subject == "alice"
         assert display_name == "Alice"
-        assert role == "viewer"
+        assert role == "admin"
         return {
             "id": "user-2",
             "subject": "alice",
@@ -1011,14 +1007,116 @@ def test_admin_users_create_normalizes_role_before_call() -> None:
         server.admin_users_create_handler(
             _request(
                 headers={"Authorization": "Bearer admin-key"},
-                body={"subject": "alice", "display_name": "Alice", "role": " VIEWER "},
+                body={"subject": "alice", "display_name": "Alice", "role": " ADMIN "},
             )
         )
     )
 
     assert response.status == 201
     payload = json.loads(response.body.decode("utf-8"))
-    assert payload["user"]["role"] == "viewer"
+    assert payload["user"]["role"] == "admin"
+
+
+def test_admin_users_create_defaults_to_standard_user_without_role() -> None:
+    config = _config_with_upstreams([_upstream()])
+    config.gateway.auth_mode = "postgres_api_keys"
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_authenticate_token(token):
+        return AuthenticatedPrincipal(
+            subject="jonfairbanks",
+            auth_scheme="postgres_api_key",
+            role="admin",
+            user_id="user-1",
+            api_key_id="key-1",
+        )
+
+    async def fake_create_user(*, subject: str, display_name: str | None, role: str | None):
+        assert subject == "alice"
+        assert display_name == "Alice"
+        assert role is None
+        return {
+            "id": "user-2",
+            "subject": "alice",
+            "display_name": "Alice",
+            "role": None,
+            "is_active": True,
+            "created_at": "2026-03-01T00:00:00+00:00",
+            "updated_at": "2026-03-01T00:00:00+00:00",
+        }
+
+    gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
+    gateway.create_user = fake_create_user  # type: ignore[method-assign]
+
+    response = asyncio.run(
+        server.admin_users_create_handler(
+            _request(
+                headers={"Authorization": "Bearer admin-key"},
+                body={"subject": "alice", "display_name": "Alice"},
+            )
+        )
+    )
+
+    assert response.status == 201
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["user"]["role"] is None
+
+
+def test_admin_users_update_clears_role_when_null_is_provided() -> None:
+    config = _config_with_upstreams([_upstream()])
+    config.gateway.auth_mode = "postgres_api_keys"
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_authenticate_token(token):
+        return AuthenticatedPrincipal(
+            subject="jonfairbanks",
+            auth_scheme="postgres_api_key",
+            role="admin",
+            user_id="user-1",
+            api_key_id="key-1",
+        )
+
+    async def fake_update_user(
+        user_id: str,
+        *,
+        display_name: str | None = None,
+        role: str | None = None,
+        role_provided: bool = False,
+        is_active: bool | None = None,
+    ):
+        assert user_id == "user-2"
+        assert display_name is None
+        assert role is None
+        assert role_provided is True
+        assert is_active is None
+        return {
+            "id": "user-2",
+            "subject": "alice",
+            "display_name": "Alice",
+            "role": None,
+            "is_active": True,
+            "created_at": "2026-03-01T00:00:00+00:00",
+            "updated_at": "2026-03-02T00:00:00+00:00",
+        }
+
+    gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
+    gateway.update_user = fake_update_user  # type: ignore[method-assign]
+
+    response = asyncio.run(
+        server.admin_users_update_handler(
+            _request(
+                headers={"Authorization": "Bearer admin-key"},
+                body={"role": None},
+                match_info={"user_id": "user-2"},
+            )
+        )
+    )
+
+    assert response.status == 200
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["role"] is None
 
 
 def test_admin_usage_handler_returns_grouped_rows() -> None:
@@ -1142,13 +1240,12 @@ def test_admin_groups_list_handler_requires_group_read_permission() -> None:
             subject="bob",
             auth_scheme="postgres_api_key",
             group_names=("sales",),
-            role="member",
             user_id="user-2",
         )
 
     gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
 
-    response = asyncio.run(server.admin_groups_list_handler(_request(headers={"Authorization": "Bearer member-key"})))
+    response = asyncio.run(server.admin_groups_list_handler(_request(headers={"Authorization": "Bearer user-key"})))
 
     assert response.status == 403
     payload = json.loads(response.body.decode("utf-8"))

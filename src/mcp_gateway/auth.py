@@ -14,9 +14,7 @@ from .postgres import PostgresStore
 from .request_context import AuthenticatedPrincipal
 
 ROLE_ADMIN = "admin"
-ROLE_MEMBER = "member"
-ROLE_VIEWER = "viewer"
-VALID_ROLES = frozenset({ROLE_ADMIN, ROLE_MEMBER, ROLE_VIEWER})
+VALID_ROLES = frozenset({ROLE_ADMIN})
 API_KEY_PREFIX_LENGTH = 12
 
 
@@ -43,11 +41,21 @@ def generate_api_key() -> tuple[str, str, str]:
     return api_key, prefix, hash_api_key(api_key)
 
 
-def normalize_role(role: str) -> str:
+def normalize_role(role: Optional[str]) -> Optional[str]:
+    if role is None:
+        return None
     normalized_role = role.strip().lower()
+    if not normalized_role:
+        return None
     if normalized_role not in VALID_ROLES:
-        raise ValueError("role must be one of: admin, member, viewer")
+        raise ValueError("role, when provided, must be admin")
     return normalized_role
+
+
+def sanitize_stored_role(role: Optional[str]) -> Optional[str]:
+    if not isinstance(role, str):
+        return None
+    return ROLE_ADMIN if role.strip().lower() == ROLE_ADMIN else None
 
 
 class AuthService:
@@ -117,7 +125,7 @@ class AuthService:
         except Exception as exc:  # noqa: BLE001
             self._logger.error("auth_backend_unavailable", auth_mode=self._config.gateway.auth_mode, error=str(exc))
             raise AuthUnavailableError("Auth backend unavailable") from exc
-        role = row["role"]
+        role = sanitize_stored_role(row.get("role"))
         return AuthenticatedPrincipal(
             subject=row["subject"],
             auth_scheme="postgres_api_key",
@@ -134,7 +142,7 @@ class AuthService:
         *,
         subject: str,
         display_name: Optional[str],
-        role: str,
+        role: Optional[str],
         key_name: str,
         expires_days: Optional[int] = None,
     ) -> dict[str, Optional[str]]:
@@ -161,7 +169,7 @@ class AuthService:
         *,
         subject: str,
         display_name: str,
-        role: str,
+        role: Optional[str],
         key_name: str,
         expires_at: Optional[datetime],
     ) -> dict[str, Optional[str]]:
@@ -210,7 +218,7 @@ class AuthService:
     async def get_user_by_subject(self, subject: str) -> Optional[Dict[str, Any]]:
         return await self._store.get_user_by_subject(subject)
 
-    async def create_user(self, *, subject: str, display_name: Optional[str], role: str) -> Optional[Dict[str, Any]]:
+    async def create_user(self, *, subject: str, display_name: Optional[str], role: Optional[str]) -> Optional[Dict[str, Any]]:
         normalized_role = normalize_role(role)
         normalized_subject = subject.strip()
         if not normalized_subject:
@@ -233,9 +241,10 @@ class AuthService:
         *,
         display_name: Optional[str] = None,
         role: Optional[str] = None,
+        role_provided: bool = False,
         is_active: Optional[bool] = None,
     ) -> Optional[Dict[str, Any]]:
-        normalized_role = normalize_role(role) if role is not None else None
+        normalized_role = normalize_role(role) if role_provided else None
         normalized_display_name = display_name.strip() if isinstance(display_name, str) else None
         if isinstance(display_name, str) and not normalized_display_name:
             raise ValueError("display_name must not be empty")
@@ -243,6 +252,7 @@ class AuthService:
             user_id,
             display_name=normalized_display_name,
             role=normalized_role,
+            role_provided=role_provided,
             is_active=is_active,
         )
 

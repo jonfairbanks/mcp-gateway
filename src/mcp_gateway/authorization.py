@@ -12,9 +12,7 @@ from .config import AppConfig
 from .request_context import AuthenticatedPrincipal
 
 GROUP_LEGACY_ADMIN = "legacy_admin"
-GROUP_LEGACY_MEMBER = "legacy_member"
-GROUP_LEGACY_VIEWER = "legacy_viewer"
-RESERVED_GROUP_NAMES = frozenset({GROUP_LEGACY_ADMIN, GROUP_LEGACY_MEMBER, GROUP_LEGACY_VIEWER})
+RESERVED_GROUP_NAMES = frozenset({GROUP_LEGACY_ADMIN})
 
 PLATFORM_PERMISSION_IDENTITIES_READ = "admin.identities.read"
 PLATFORM_PERMISSION_IDENTITIES_WRITE = "admin.identities.write"
@@ -158,9 +156,5 @@ class AuthorizationService:
         group_names = set(principal.group_names)
         if principal.role == "admin":
             group_names.add(GROUP_LEGACY_ADMIN)
-        elif principal.role == "member":
-            group_names.add(GROUP_LEGACY_MEMBER)
-        elif principal.role == "viewer":
-            group_names.add(GROUP_LEGACY_VIEWER)
         subjects.extend(f"group:{group_name}" for group_name in sorted(group_names))
         return subjects

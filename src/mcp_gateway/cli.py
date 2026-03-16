@@ -55,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_key_parser.add_argument("--config", required=True)
     create_key_parser.add_argument("--subject", required=True)
     create_key_parser.add_argument("--display-name")
-    create_key_parser.add_argument("--role", default="member")
+    create_key_parser.add_argument("--role", choices=["admin"])
     create_key_parser.add_argument("--key-name", default="default")
     create_key_parser.add_argument("--expires-days", type=int)
 

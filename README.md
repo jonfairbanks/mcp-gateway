@@ -64,7 +64,7 @@ Set `gateway.public_tools_catalog: true` only if you want `GET /tools` to be bro
 For multi-user auth, set `gateway.auth_mode: "postgres_api_keys"`, keep `DATABASE_URL` set, and optionally configure `gateway.bootstrap_admin_api_key` for break-glass admin access.
 In `postgres_api_keys` mode, `admin` retains full platform access. Non-admin API-key users authenticate successfully, but tool execution and admin access come from PyCasbin group memberships plus integration or platform grants.
 
-To seed the first database-backed user key:
+To seed the first database-backed admin key:
 
 ```bash
 DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway' \
@@ -72,9 +72,11 @@ DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway' \
   --config /path/to/config.yaml \
   --subject alice \
   --display-name "Alice" \
-  --role member \
+  --role admin \
   --key-name default
 ```
+
+For standard non-admin users, omit `--role` and assign access through groups and grants.
 
 Once you have an admin key, the gateway also exposes JSON management APIs:
 
@@ -145,9 +147,9 @@ http_headers = { "Authorization" = "Bearer change-me" }
 - `GET /v1/admin/identities` lists local identities keyed by subject; admin only.
 - `PUT /v1/admin/identities/{subject}` creates or replaces a local identity record; admin only.
 - `PATCH /v1/admin/identities/{subject}` updates identity metadata or active status; admin only.
-- `GET /v1/admin/users` lists all managed users with roles and active status; admin only.
+- `GET /v1/admin/users` lists all managed users with role metadata and active status; admin only.
 - `POST /v1/admin/users` creates a managed user and can optionally issue an initial API key; admin only.
-- `PATCH /v1/admin/users/{user_id}` updates a user’s display name, role, or active status; admin only.
+- `PATCH /v1/admin/users/{user_id}` updates a user’s display name, admin status, or active status; admin only.
 - `GET /v1/admin/integrations` lists configured upstream integration ids that can be granted through PyCasbin; admin only.
 - `GET /v1/admin/groups` lists RBAC groups; admin only.
 - `POST /v1/admin/groups` creates an RBAC group; admin only.
@@ -176,6 +178,7 @@ Default local endpoints:
 
 ## Docs
 
+- RBAC onboarding: [`docs/rbac-onboarding.md`](docs/rbac-onboarding.md)
 - Configuration reference: [`docs/configuration.md`](docs/configuration.md)
 - Database schema: [`schema.sql`](schema.sql)
 
