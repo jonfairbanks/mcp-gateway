@@ -38,6 +38,7 @@ When enabled, the gateway emits spans for:
 - incoming HTTP requests
 - MCP method handling inside the gateway
 - outbound upstream calls
+- Postgres repository operations such as audit writes, cache access, auth lookups, and rate limiting
 
 For `streamable_http` upstreams, the current trace context is propagated on outbound requests with standard trace headers.
 

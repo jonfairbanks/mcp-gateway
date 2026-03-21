@@ -852,9 +852,15 @@ class Gateway:
 
                 response = await self._call_upstream(upstream, payload)
                 error = response.payload.get("error")
+                expected_unsupported = (
+                    isinstance(error, dict)
+                    and error.get("code") == -32601
+                    and method in OPTIONAL_DISCOVERY_METHODS
+                )
                 self._telemetry.annotate_upstream_result(
                     success=response.success,
                     error=error if isinstance(error, dict) else None,
+                    expected_unsupported=expected_unsupported,
                 )
                 return UpstreamExecution(
                     success=response.success,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from mcp_gateway.telemetry import GatewayTelemetry
@@ -66,3 +69,23 @@ def test_extract_context_round_trips_traceparent() -> None:
     extracted = propagator.extract(carrier=carrier, context=context)
 
     assert extracted is not None
+
+
+def test_optional_discovery_unsupported_upstream_span_is_not_marked_error() -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    telemetry = GatewayTelemetry(tracer_provider=provider)
+
+    with telemetry.start_upstream_span("context7", "stdio", "resources/templates/list", notification=False):
+        telemetry.annotate_upstream_result(
+            success=False,
+            error={"code": -32601, "message": "Method not found"},
+            expected_unsupported=True,
+        )
+
+    span = exporter.get_finished_spans()[0]
+
+    assert span.status.status_code == StatusCode.OK
+    assert span.attributes["mcp.success"] is False
+    assert span.attributes["mcp.expected_unsupported"] is True

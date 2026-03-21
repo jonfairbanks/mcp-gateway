@@ -198,11 +198,16 @@ class GatewayTelemetry:
         *,
         success: bool,
         error: Optional[dict[str, object]] = None,
+        expected_unsupported: bool = False,
     ) -> None:
         span = trace.get_current_span()
         if not span.is_recording():
             return
         span.set_attribute("mcp.success", success)
+        if expected_unsupported:
+            span.set_attribute("mcp.expected_unsupported", True)
+            span.set_status(Status(StatusCode.OK))
+            return
         if error:
             message = error.get("message")
             span.set_status(Status(StatusCode.ERROR, str(message) if message is not None else "Upstream request failed"))
