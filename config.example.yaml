@@ -74,72 +74,71 @@ upstreams:
   # Notion #
   ##########
 
-  - id: "notion"
-    name: "notion"
-    transport: "stdio"
-    command: "npx"
-    args:
-      - "-y"
-      - "@notionhq/notion-mcp-server"
-    env:
-      NOTION_TOKEN: "${NOTION_TOKEN:-ntn_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}"
-    deny_tools:
-      - "API-post-page"
-      - "API-patch-page"
-      - "API-patch-block-children"
-      - "API-update-a-block"
-      - "API-delete-a-block"
-      - "API-create-a-comment"
-      - "API-update-a-data-source"
-      - "API-create-a-data-source"
-      - "API-move-page"
-    tool_routes:
-      - "notion."
+  # - id: "notion"
+  #   name: "notion"
+  #   transport: "stdio"
+  #   command: "npx"
+  #   args:
+  #     - "-y"
+  #     - "@notionhq/notion-mcp-server"
+  #   env: {}
+  #   deny_tools:
+  #     - "API-post-page"
+  #     - "API-patch-page"
+  #     - "API-patch-block-children"
+  #     - "API-update-a-block"
+  #     - "API-delete-a-block"
+  #     - "API-create-a-comment"
+  #     - "API-update-a-data-source"
+  #     - "API-create-a-data-source"
+  #     - "API-move-page"
+  #   tool_routes:
+  #     - "notion."
 
   #######
   # AWS #
   #######
 
-  - id: "aws-mcp"
-    name: "aws-mcp"
-    transport: "stdio"
-    command: "uvx"
-    args:
-      - "mcp-proxy-for-aws@latest"
-      - "https://aws-mcp.us-east-1.api.aws/mcp"
-      - "--metadata"
-      - "AWS_REGION=us-east-1"
-    env:
-      AWS_ACCESS_KEY_ID: "..."
-      AWS_SECRET_ACCESS_KEY: "..."
-    deny_tools: []
-    tool_routes:
-      - "aws."
+  # - id: "aws-mcp"
+  #   name: "aws-mcp"
+  #   transport: "stdio"
+  #   command: "uvx"
+  #   args:
+  #     - "mcp-proxy-for-aws@latest"
+  #     - "https://aws-mcp.us-east-1.api.aws/mcp"
+  #     - "--metadata"
+  #     - "AWS_REGION=us-east-1"
+  #   env:
+  #     AWS_ACCESS_KEY_ID: "..."
+  #     AWS_SECRET_ACCESS_KEY: "..."
+  #   deny_tools: []
+  #   tool_routes:
+  #     - "aws."
 
   ###########
   # Grafana #
   ###########
 
-  - id: "grafana"
-    name: "grafana"
-    transport: "stdio"
-    command: "uvx"
-    args:
-      - "mcp-grafana"
-    env:
-      GRAFANA_URL: "${GRAFANA_URL:-http://localhost:3000}"
-      GRAFANA_SERVICE_ACCOUNT_TOKEN: "${GRAFANA_SERVICE_ACCOUNT_TOKEN:-<your service account token>}"
-    timeout_ms: 180000
-    deny_tools: []
+  # - id: "grafana"
+  #   name: "grafana"
+  #   transport: "stdio"
+  #   command: "uvx"
+  #   args:
+  #     - "mcp-grafana"
+  #   env:
+  #     GRAFANA_URL: "${GRAFANA_URL:-http://localhost:3000}"
+  #     GRAFANA_SERVICE_ACCOUNT_TOKEN: "${GRAFANA_SERVICE_ACCOUNT_TOKEN:-change-me}"
+  #   timeout_ms: 180000
+  #   deny_tools: []
 
   ##########
   # GitHub #
   ##########
 
-  - id: "github"
-    name: "github"
-    transport: "streamable_http"
-    endpoint: "https://api.githubcopilot.com/mcp/"
-    bearer_token_env_var: "GITHUB_PAT_TOKEN"
-    timeout_ms: 30000
-    deny_tools: []
+  # - id: "github"
+  #   name: "github"
+  #   transport: "streamable_http"
+  #   endpoint: "https://api.githubcopilot.com/mcp/"
+  #   bearer_token_env_var: "GITHUB_PAT_TOKEN"
+  #   timeout_ms: 30000
+  #   deny_tools: []
