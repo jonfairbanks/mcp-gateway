@@ -441,6 +441,8 @@ class HttpServer:
                 continue
             if payload is not None:
                 responses.append(payload)
+        # JSON-RPC notifications do not produce response bodies, so a batch that is
+        # entirely notifications is surfaced as HTTP 202 with no JSON payload.
         if not responses:
             if protocol_version is None:
                 return web.Response(status=202)
@@ -455,6 +457,8 @@ class HttpServer:
         if isinstance(payload, dict) and payload.get("method") == "initialize":
             params = payload.get("params")
             requested_version = params.get("protocolVersion") if isinstance(params, dict) else None
+            # `initialize` negotiates protocol version from the JSON-RPC payload.
+            # Later requests rely on the transport header instead.
             if is_supported_protocol_version(requested_version):
                 return requested_version, None
             return None, None

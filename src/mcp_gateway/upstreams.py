@@ -59,6 +59,8 @@ class StreamableHTTPUpstream:
     async def _request_headers(self) -> Dict[str, str]:
         headers = dict(self._headers)
         headers.setdefault("Content-Type", "application/json")
+        # Some upstreams still return SSE-framed JSON-RPC responses even when the
+        # gateway only uses POST /mcp, so keep the broader Accept header here.
         headers.setdefault("Accept", "application/json, text/event-stream")
         headers.setdefault("MCP-Protocol-Version", self._protocol_version)
         if self._session_id:
@@ -80,6 +82,8 @@ class StreamableHTTPUpstream:
 
     @asynccontextmanager
     async def _request_guard(self):
+        # Certain vendor MCPs require one-at-a-time HTTP requests even though the
+        # gateway runs other upstreams concurrently.
         if self._serialize_requests:
             async with self._lock:
                 yield

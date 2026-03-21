@@ -39,7 +39,7 @@ for raw_line in sys.stdin:
                 "result": {
                     "protocolVersion": request.get("params", {}).get("protocolVersion", CURRENT_PROTOCOL_VERSION),
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "fake-stdio-upstream", "version": "0.1.0"},
+                    "serverInfo": {"name": "fake-stdio-upstream", "version": "1.0.0"},
                 },
             }
         )
