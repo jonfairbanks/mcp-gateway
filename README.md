@@ -115,11 +115,11 @@ upstreams:
 
 ## Guide Map
 
-- Deployment guide: [docs/deployment-guide.md](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/deployment-guide.md)
-- Client configuration: [docs/client-configuration.md](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/client-configuration.md)
-- Operations guide: [docs/operations.md](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/operations.md)
-- Configuration reference: [docs/configuration.md](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/configuration.md)
-- RBAC onboarding: [docs/rbac-onboarding.md](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/rbac-onboarding.md)
-- Development and testing: [docs/development.md](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/development.md)
-- Database schema: [schema.sql](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/schema.sql)
-- Postman collection: [docs/postman/mcp-gateway.postman_collection.json](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/postman/mcp-gateway.postman_collection.json)
+- Deployment guide: [docs/deployment-guide.md](docs/deployment-guide.md)
+- Client configuration: [docs/client-configuration.md](docs/client-configuration.md)
+- Operations guide: [docs/operations.md](docs/operations.md)
+- Configuration reference: [docs/configuration.md](docs/configuration.md)
+- RBAC onboarding: [docs/rbac-onboarding.md](docs/rbac-onboarding.md)
+- Development and testing: [docs/development.md](docs/development.md)
+- Database schema: [schema.sql](schema.sql)
+- Postman collection: [docs/postman/mcp-gateway.postman_collection.json](docs/postman/mcp-gateway.postman_collection.json)

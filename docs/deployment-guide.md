@@ -31,7 +31,7 @@ Before deploying, make sure you have:
 
 ## Quick Start
 
-1. Copy [`config.example.yaml`](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/config.example.yaml) to your deployment config path.
+1. Copy [`config.example.yaml`](../config.example.yaml) to your deployment config path.
 2. Set secrets and tokens with environment variables instead of committing them into the config file.
 3. Apply the schema:
 

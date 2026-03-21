@@ -21,5 +21,5 @@ pytest tests/test_integration_app.py
 
 ## Useful References
 
-- Database schema: [`schema.sql`](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/schema.sql)
-- Postman collection: [`docs/postman/mcp-gateway.postman_collection.json`](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/postman/mcp-gateway.postman_collection.json)
+- Database schema: [`schema.sql`](../schema.sql)
+- Postman collection: [`docs/postman/mcp-gateway.postman_collection.json`](postman/mcp-gateway.postman_collection.json)
