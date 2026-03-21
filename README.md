@@ -83,7 +83,7 @@ cache:
 
 upstreams:
   - id: "context7"
-    name: "context7"
+    name: "Context7 MCP"
     transport: "stdio"
     command: "npx"
     args:
@@ -91,7 +91,7 @@ upstreams:
       - "@upstash/context7-mcp"
 
   - id: "github"
-    name: "github"
+    name: "GitHub MCP"
     transport: "streamable_http"
     endpoint: "https://api.githubcopilot.com/mcp/"
     bearer_token_env_var: "GITHUB_PAT_TOKEN"
