@@ -10,6 +10,8 @@ from typing import Any, Callable, Dict, Optional
 
 import aiohttp
 
+from .protocol import CURRENT_PROTOCOL_VERSION, is_supported_protocol_version
+
 
 @dataclass
 class UpstreamResponse:
@@ -38,7 +40,7 @@ class StreamableHTTPUpstream:
         self._bearer_token_env_var = bearer_token_env_var
         self._serialize_requests = serialize_requests
         self._session_id: Optional[str] = None
-        self._protocol_version = "2024-11-05"
+        self._protocol_version = CURRENT_PROTOCOL_VERSION
         self._session: Optional[aiohttp.ClientSession] = None
         self._start_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
@@ -142,6 +144,10 @@ class StreamableHTTPUpstream:
                             "data": data,
                         },
                     }
+                if payload.get("method") == "initialize":
+                    result = data.get("result")
+                    if isinstance(result, dict) and is_supported_protocol_version(result.get("protocolVersion")):
+                        self._protocol_version = result["protocolVersion"]
                 success = "error" not in data
                 return UpstreamResponse(payload=data, success=success)
 

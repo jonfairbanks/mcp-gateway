@@ -13,6 +13,7 @@ from mcp_gateway.config import AppConfig, CacheConfig, GatewayConfig, LoggingCon
 from mcp_gateway.gateway import Gateway
 from mcp_gateway.logging import Logger
 from mcp_gateway.postgres import PostgresStore
+from mcp_gateway.protocol import CURRENT_PROTOCOL_VERSION
 from mcp_gateway.server_http import HttpServer
 from mcp_gateway.telemetry import GatewayTelemetry
 
@@ -162,7 +163,7 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging()
                         "jsonrpc": "2.0",
                         "id": payload.get("id"),
                         "result": {
-                            "protocolVersion": payload.get("params", {}).get("protocolVersion", "2024-11-05"),
+                            "protocolVersion": payload.get("params", {}).get("protocolVersion", CURRENT_PROTOCOL_VERSION),
                             "capabilities": {"tools": {}},
                             "serverInfo": {"name": "fake-http-upstream", "version": "0.1.0"},
                         },
@@ -240,7 +241,7 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging()
                                 "id": "init-1",
                                 "method": "initialize",
                                 "params": {
-                                    "protocolVersion": "2024-11-05",
+                                    "protocolVersion": CURRENT_PROTOCOL_VERSION,
                                     "capabilities": {},
                                     "clientInfo": {"name": "phase-1-test", "version": "0.1.0"},
                                 },
@@ -248,7 +249,8 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging()
                         )
                         initialize_payload = await initialize_response.json()
                         assert initialize_response.status == 200
-                        assert initialize_payload["result"]["protocolVersion"] == "2024-11-05"
+                        assert initialize_payload["result"]["protocolVersion"] == CURRENT_PROTOCOL_VERSION
+                        assert initialize_response.headers["MCP-Protocol-Version"] == CURRENT_PROTOCOL_VERSION
 
                         initialized_response = await client.post(
                             "/mcp",
@@ -328,7 +330,7 @@ def test_rate_limits_apply_across_two_gateway_instances_with_shared_postgres() -
                         "jsonrpc": "2.0",
                         "id": payload.get("id"),
                         "result": {
-                            "protocolVersion": payload.get("params", {}).get("protocolVersion", "2024-11-05"),
+                            "protocolVersion": payload.get("params", {}).get("protocolVersion", CURRENT_PROTOCOL_VERSION),
                             "capabilities": {"tools": {}},
                             "serverInfo": {"name": "fake-http-upstream", "version": "0.1.0"},
                         },

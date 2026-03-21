@@ -14,6 +14,7 @@ from .config import AppConfig, UpstreamConfig
 from .jsonrpc import make_error_response, normalize_params
 from .logging import Logger, Timer
 from .postgres import PostgresStore
+from .protocol import CURRENT_PROTOCOL_VERSION, negotiate_protocol_version
 from .request_context import AuthenticatedPrincipal, RequestContext
 from .router import build_routes, select_upstream
 from .telemetry import GatewayTelemetry
@@ -72,6 +73,17 @@ class UpstreamExecution:
     payload: Dict[str, Any]
     log_payload: Dict[str, Any]
     error: Optional[Dict[str, Any]]
+
+
+@dataclass
+class WarmupResult:
+    upstream: UpstreamConfig
+    initialize_success: bool
+    initialize_error: Optional[Dict[str, Any]]
+    tools_list_success: bool
+    tools_list_error: Optional[Dict[str, Any]]
+    tool_names: list[str]
+    tool_payloads: list[Dict[str, Any]]
 
 
 class Gateway:
@@ -998,8 +1010,12 @@ class Gateway:
         successful_upstreams = 0
         upstream_errors: list[Dict[str, Any]] = []
 
-        for upstream in self._config.upstreams:
-            execution = await self._execute_upstream_operation(upstream, method, payload)
+        executions = await self._fan_out_upstream_operations(
+            self._config.upstreams,
+            lambda upstream: self._execute_upstream_operation(upstream, method, payload),
+        )
+
+        for upstream, execution in executions:
             error = execution.error
             if isinstance(error, dict):
                 code = error.get("code")
@@ -1122,20 +1138,28 @@ class Gateway:
     async def _fanout_initialize(self, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
         successful = 0
         merged_capabilities: Dict[str, Any] = {}
-        protocol_version: Optional[str] = None
         server_name = "mcp-gateway"
         server_version = "0.1.0"
+        params = payload.get("params")
+        requested_protocol_version = params.get("protocolVersion") if isinstance(params, dict) else None
+        negotiated_protocol_version = negotiate_protocol_version(requested_protocol_version)
+        upstream_payload = dict(payload)
+        upstream_params = dict(params) if isinstance(params, dict) else {}
+        upstream_params["protocolVersion"] = negotiated_protocol_version
+        upstream_payload["params"] = upstream_params
 
-        for upstream in self._config.upstreams:
-            execution = await self._execute_upstream_operation(upstream, "initialize", payload)
+        executions = await self._fan_out_upstream_operations(
+            self._config.upstreams,
+            lambda upstream: self._execute_upstream_operation(upstream, "initialize", upstream_payload),
+        )
+
+        for upstream, execution in executions:
             result = execution.payload.get("result")
             success = execution.success and isinstance(result, dict)
             await self._record_health(upstream.id, "initialize", success)
             if not success:
                 continue
             successful += 1
-            if protocol_version is None and isinstance(result.get("protocolVersion"), str):
-                protocol_version = result["protocolVersion"]
             capabilities = result.get("capabilities")
             if isinstance(capabilities, dict):
                 merged_capabilities = self._merge_dicts(merged_capabilities, capabilities)
@@ -1145,101 +1169,133 @@ class Gateway:
             return make_error_response(payload.get("id"), -32003, "No upstream responded to initialize"), False
 
         result_payload = {
-            "protocolVersion": protocol_version or "2024-11-05",
+            "protocolVersion": negotiated_protocol_version,
             "capabilities": merged_capabilities,
             "serverInfo": {"name": server_name, "version": server_version},
         }
         return {"jsonrpc": "2.0", "id": payload.get("id"), "result": result_payload}, True
 
     async def _fanout_initialized_notification(self, payload: Dict[str, Any]) -> bool:
-        successful = 0
-        for upstream in self._config.upstreams:
-            execution = await self._execute_upstream_operation(
+        executions = await self._fan_out_upstream_operations(
+            self._config.upstreams,
+            lambda upstream: self._execute_upstream_operation(
                 upstream,
                 "notifications/initialized",
                 payload,
                 notification=True,
-            )
+            ),
+        )
+        successful = 0
+        for upstream, execution in executions:
             await self._record_health(upstream.id, "notifications/initialized", execution.success)
             if execution.success:
                 successful += 1
         return successful > 0
 
+    async def _fan_out_upstream_operations(
+        self,
+        upstreams: list[UpstreamConfig],
+        operation,
+        *,
+        max_parallelism: int = 8,
+    ) -> list[tuple[UpstreamConfig, Any]]:
+        if not upstreams:
+            return []
+        concurrency = max(1, min(max_parallelism, len(upstreams)))
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def run(upstream: UpstreamConfig) -> tuple[UpstreamConfig, Any]:
+            async with semaphore:
+                return upstream, await operation(upstream)
+
+        return list(await asyncio.gather(*(run(upstream) for upstream in upstreams)))
+
+    async def _warmup_single_upstream(self, upstream: UpstreamConfig) -> WarmupResult:
+        init_payload = {
+            "jsonrpc": "2.0",
+            "id": "warmup-initialize",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": CURRENT_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "mcp-gateway", "version": "0.1.0"},
+            },
+        }
+        init_execution = await self._execute_upstream_operation(upstream, "initialize", init_payload)
+        init_success = init_execution.success and isinstance(init_execution.payload.get("result"), dict)
+        init_error = None if init_success else init_execution.error
+        await self._record_health(upstream.id, "initialize", init_success)
+
+        if init_success:
+            notify_payload = {
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {},
+            }
+            notify_execution = await self._execute_upstream_operation(
+                upstream,
+                "notifications/initialized",
+                notify_payload,
+                notification=True,
+            )
+            await self._record_health(upstream.id, "notifications/initialized", notify_execution.success)
+
+        tools_payload = {
+            "jsonrpc": "2.0",
+            "id": "warmup-tools-list",
+            "method": "tools/list",
+            "params": {},
+        }
+        tools_execution = await self._execute_upstream_operation(upstream, "tools/list", tools_payload)
+        result = tools_execution.payload.get("result")
+        tool_payloads: list[Dict[str, Any]] = []
+        tool_names: list[str] = []
+        tools_list_success = False
+        tools_list_error: Optional[Dict[str, Any]] = tools_execution.error
+        if tools_execution.success and isinstance(result, dict):
+            tool_payloads = [tool for tool in (result.get("tools", []) or []) if isinstance(tool, dict)]
+            tool_names = [tool["name"] for tool in tool_payloads if isinstance(tool.get("name"), str)]
+            tools_list_success = True
+            tools_list_error = None
+        await self._record_health(upstream.id, "tools/list", tools_list_success)
+        return WarmupResult(
+            upstream=upstream,
+            initialize_success=init_success,
+            initialize_error=init_error,
+            tools_list_success=tools_list_success,
+            tools_list_error=tools_list_error,
+            tool_names=tool_names,
+            tool_payloads=tool_payloads,
+        )
+
     async def warmup(self) -> None:
         # Prime upstream sessions and seed tool registry before client traffic.
         tool_payloads: list[tuple[UpstreamConfig, list[Dict[str, Any]]]] = []
-        for upstream in self._config.upstreams:
-            init_success = False
-            tools_list_success = False
-            tool_names: list[str] = []
-            init_error: Optional[Dict[str, Any]] = None
-            tools_list_error: Optional[Dict[str, Any]] = None
-
-            init_payload = {
-                "jsonrpc": "2.0",
-                "id": "warmup-initialize",
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "mcp-gateway", "version": "0.1.0"},
-                },
-            }
-            init_execution = await self._execute_upstream_operation(upstream, "initialize", init_payload)
-            init_success = init_execution.success and isinstance(init_execution.payload.get("result"), dict)
-            if not init_success:
-                init_error = init_execution.error
-            await self._record_health(upstream.id, "initialize", init_success)
-
-            if init_success:
-                notify_payload = {
-                    "jsonrpc": "2.0",
-                    "method": "notifications/initialized",
-                    "params": {},
-                }
-                notify_execution = await self._execute_upstream_operation(
-                    upstream,
-                    "notifications/initialized",
-                    notify_payload,
-                    notification=True,
-                )
-                await self._record_health(upstream.id, "notifications/initialized", notify_execution.success)
-
-            tools_payload = {
-                "jsonrpc": "2.0",
-                "id": "warmup-tools-list",
-                "method": "tools/list",
-                "params": {},
-            }
-            tools_execution = await self._execute_upstream_operation(upstream, "tools/list", tools_payload)
-            result = tools_execution.payload.get("result")
-            if tools_execution.success and isinstance(result, dict):
-                tools = result.get("tools", []) or []
-                tool_payloads.append((upstream, tools))
-                tool_names = [t.get("name") for t in tools if isinstance(t, dict) and isinstance(t.get("name"), str)]
-                tools_list_success = True
-            else:
-                tools_list_success = False
-                tools_list_error = tools_execution.error
-            await self._record_health(upstream.id, "tools/list", tools_list_success)
+        results = await self._fan_out_upstream_operations(
+            self._config.upstreams,
+            self._warmup_single_upstream,
+        )
+        for upstream, result in results:
+            if result.tool_payloads:
+                tool_payloads.append((upstream, result.tool_payloads))
 
             self._logger.info(
                 "upstream_warmup",
                 upstream_id=upstream.id,
-                initialize_success=init_success,
-                initialize_error=init_error,
-                tools_list_success=tools_list_success,
-                tools_list_error=tools_list_error,
-                tool_count=len(tool_names),
-                tools=tool_names,
+                initialize_success=result.initialize_success,
+                initialize_error=result.initialize_error,
+                tools_list_success=result.tools_list_success,
+                tools_list_error=result.tools_list_error,
+                tool_count=len(result.tool_names),
+                tools=result.tool_names,
             )
             self._warmup_status[upstream.id] = {
-                "initialize_success": init_success,
-                "initialize_error": init_error,
-                "tools_list_success": tools_list_success,
-                "tools_list_error": tools_list_error,
-                "tool_count": len(tool_names),
-                "tools": tool_names,
+                "initialize_success": result.initialize_success,
+                "initialize_error": result.initialize_error,
+                "tools_list_success": result.tools_list_success,
+                "tools_list_error": result.tools_list_error,
+                "tool_count": len(result.tool_names),
+                "tools": result.tool_names,
             }
 
         registry_state = self._build_tool_registry_state(tool_payloads)

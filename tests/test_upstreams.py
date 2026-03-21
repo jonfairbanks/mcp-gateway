@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from mcp_gateway import upstreams
+from mcp_gateway.protocol import CURRENT_PROTOCOL_VERSION
 
 FIXTURE_STDIO_UPSTREAM = Path(__file__).resolve().parent / "fixtures" / "fake_stdio_upstream.py"
 
@@ -109,7 +110,7 @@ def test_http_upstream_call_parses_sse_response_and_ignores_notifications() -> N
                 "jsonrpc": "2.0",
                 "id": "req-1",
                 "method": "initialize",
-                "params": {"protocolVersion": "2024-11-05"},
+                "params": {"protocolVersion": CURRENT_PROTOCOL_VERSION},
             }
         )
     )
@@ -118,6 +119,41 @@ def test_http_upstream_call_parses_sse_response_and_ignores_notifications() -> N
     assert response.payload["id"] == "req-1"
     assert response.payload["result"] == {"capabilities": {"tools": {}}}
     assert client._session_id == "session-123"
+
+
+def test_http_upstream_ignores_unsupported_protocol_version_from_initialize_result() -> None:
+    client = upstreams.StreamableHTTPUpstream("https://example.com/mcp", 1000)
+    client._session = FakeClientSession(
+        [
+            FakeResponse(
+                200,
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "req-1",
+                        "result": {
+                            "protocolVersion": "2025-03-26",
+                            "capabilities": {"tools": {}},
+                        },
+                    }
+                ),
+            )
+        ]
+    )
+
+    response = asyncio.run(
+        client.call(
+            {
+                "jsonrpc": "2.0",
+                "id": "req-1",
+                "method": "initialize",
+                "params": {"protocolVersion": CURRENT_PROTOCOL_VERSION},
+            }
+        )
+    )
+
+    assert response.success is True
+    assert client._protocol_version == CURRENT_PROTOCOL_VERSION
 
 
 def test_http_upstream_call_errors_when_sse_body_has_no_matching_response() -> None:

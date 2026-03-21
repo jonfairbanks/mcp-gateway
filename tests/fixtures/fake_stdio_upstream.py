@@ -5,6 +5,8 @@ import os
 import sys
 from typing import Any
 
+from mcp_gateway.protocol import CURRENT_PROTOCOL_VERSION
+
 TOOL_NAME = os.getenv("FAKE_STDIO_TOOL_NAME", "stdio.echo")
 EXIT_AFTER_RESPONSES = int(os.getenv("FAKE_STDIO_EXIT_AFTER_RESPONSES", "0"))
 response_count = 0
@@ -35,7 +37,7 @@ for raw_line in sys.stdin:
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": {
-                    "protocolVersion": request.get("params", {}).get("protocolVersion", "2024-11-05"),
+                    "protocolVersion": request.get("params", {}).get("protocolVersion", CURRENT_PROTOCOL_VERSION),
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": "fake-stdio-upstream", "version": "0.1.0"},
                 },

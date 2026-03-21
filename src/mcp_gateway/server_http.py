@@ -26,6 +26,7 @@ from .errors import GatewayHTTPError
 from .gateway import Gateway
 from .jsonrpc import make_error_response
 from .logging import Logger
+from .protocol import DEFAULT_HTTP_PROTOCOL_VERSION, is_supported_protocol_version
 from .request_context import AuthenticatedPrincipal, RequestContext
 from .telemetry import GatewayTelemetry
 
@@ -390,8 +391,16 @@ class HttpServer:
             return None, web.json_response(make_error_response(None, -32700, "Invalid JSON"), status=400)
 
     @staticmethod
-    def _jsonrpc_http_response(payload: Any, status: int = 200) -> web.Response:
-        return web.json_response(payload, status=status)
+    def _jsonrpc_http_response(
+        payload: Any,
+        status: int = 200,
+        *,
+        protocol_version: Optional[str] = None,
+    ) -> web.Response:
+        headers = {}
+        if protocol_version is not None:
+            headers["MCP-Protocol-Version"] = protocol_version
+        return web.json_response(payload, status=status, headers=headers)
 
     @staticmethod
     def _is_jsonrpc_response_message(payload: dict[str, Any]) -> bool:
@@ -413,7 +422,13 @@ class HttpServer:
             return None, None
         return result.payload, None
 
-    async def _handle_batch_message(self, payloads: list[Any], request_context: RequestContext) -> web.Response:
+    async def _handle_batch_message(
+        self,
+        payloads: list[Any],
+        request_context: RequestContext,
+        *,
+        protocol_version: Optional[str] = None,
+    ) -> web.Response:
         if not payloads:
             return self._jsonrpc_http_response(make_error_response(None, -32600, "Invalid Request"), status=400)
         responses: list[dict[str, Any]] = []
@@ -427,8 +442,24 @@ class HttpServer:
             if payload is not None:
                 responses.append(payload)
         if not responses:
-            return web.Response(status=202)
-        return self._jsonrpc_http_response(responses)
+            if protocol_version is None:
+                return web.Response(status=202)
+            return web.Response(status=202, headers={"MCP-Protocol-Version": protocol_version})
+        return self._jsonrpc_http_response(responses, protocol_version=protocol_version)
+
+    def _effective_protocol_version(self, request: web.Request, payload: Any) -> tuple[Optional[str], Optional[web.Response]]:
+        header_version = request.headers.get("MCP-Protocol-Version") or request.headers.get("mcp-protocol-version")
+        if header_version is not None and not is_supported_protocol_version(header_version):
+            return None, web.Response(status=400, text="Unsupported MCP-Protocol-Version header.")
+
+        if isinstance(payload, dict) and payload.get("method") == "initialize":
+            params = payload.get("params")
+            requested_version = params.get("protocolVersion") if isinstance(params, dict) else None
+            if is_supported_protocol_version(requested_version):
+                return requested_version, None
+            return None, None
+
+        return header_version or DEFAULT_HTTP_PROTOCOL_VERSION, None
 
     async def health_handler(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "service": "mcp-gateway", **self._gateway.status_snapshot()})
@@ -1236,14 +1267,23 @@ class HttpServer:
         payload, invalid_json = await self._parse_json_request(request)
         if invalid_json:
             return invalid_json
+        protocol_version, invalid_protocol = self._effective_protocol_version(request, payload)
+        if invalid_protocol is not None:
+            return invalid_protocol
         if isinstance(payload, list):
-            return await self._handle_batch_message(payload, request_context)
+            return await self._handle_batch_message(payload, request_context, protocol_version=protocol_version)
         single_payload, invalid = await self._handle_single_message(payload, request_context)
         if invalid is not None:
             return invalid
         if single_payload is None:
-            return web.Response(status=202)
-        return self._jsonrpc_http_response(single_payload)
+            if protocol_version is None:
+                return web.Response(status=202)
+            return web.Response(status=202, headers={"MCP-Protocol-Version": protocol_version})
+        if protocol_version is None and isinstance(single_payload, dict):
+            result = single_payload.get("result")
+            if isinstance(result, dict) and is_supported_protocol_version(result.get("protocolVersion")):
+                protocol_version = result["protocolVersion"]
+        return self._jsonrpc_http_response(single_payload, protocol_version=protocol_version)
 
     def build_app(self) -> web.Application:
         app = web.Application(

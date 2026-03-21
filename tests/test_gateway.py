@@ -7,9 +7,10 @@ from uuid import UUID
 
 from mcp_gateway.config import AppConfig, CacheConfig, GatewayConfig, LoggingConfig, UpstreamConfig
 from mcp_gateway.errors import ConflictError, NotFoundError
-from mcp_gateway.gateway import Gateway, GatewayResult
+from mcp_gateway.gateway import Gateway, GatewayResult, UpstreamExecution
 from mcp_gateway.logging import Logger
 from mcp_gateway.postgres import PostgresStore
+from mcp_gateway.protocol import CURRENT_PROTOCOL_VERSION
 from mcp_gateway.request_context import AuthenticatedPrincipal, RequestContext
 from mcp_gateway.router import build_routes, select_upstream
 from mcp_gateway.server_http import HttpServer
@@ -745,6 +746,80 @@ def test_warmup_fails_on_duplicate_tool_names() -> None:
     raise AssertionError("warmup should fail on duplicate tool names")
 
 
+def test_fanout_initialize_executes_upstreams_concurrently() -> None:
+    config = _config_with_upstreams([_upstream("one"), _upstream("two"), _upstream("three")])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    active_calls = 0
+    max_active_calls = 0
+    lock = asyncio.Lock()
+
+    async def fake_execute(upstream, method, payload, *, notification=False):
+        nonlocal active_calls, max_active_calls
+        assert method == "initialize"
+        async with lock:
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+        await asyncio.sleep(0.01)
+        async with lock:
+            active_calls -= 1
+        return UpstreamExecution(
+            success=True,
+            payload={"jsonrpc": "2.0", "id": payload.get("id"), "result": {"capabilities": {}, "protocolVersion": CURRENT_PROTOCOL_VERSION}},
+            log_payload={"ok": True},
+            error=None,
+        )
+
+    gateway._execute_upstream_operation = fake_execute  # type: ignore[method-assign]
+
+    response_payload, success = asyncio.run(
+        gateway._fanout_initialize(
+            {
+                "jsonrpc": "2.0",
+                "id": "init-1",
+                "method": "initialize",
+                "params": {"protocolVersion": CURRENT_PROTOCOL_VERSION},
+            }
+        )
+    )
+
+    assert success is True
+    assert response_payload["result"]["protocolVersion"] == CURRENT_PROTOCOL_VERSION
+    assert max_active_calls > 1
+
+
+def test_fanout_initialize_negotiates_latest_supported_version_for_unknown_client_version() -> None:
+    config = _config_with_upstreams([_upstream("one")])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    seen_versions: list[str] = []
+
+    async def fake_execute(upstream, method, payload, *, notification=False):
+        assert method == "initialize"
+        seen_versions.append(payload["params"]["protocolVersion"])
+        return UpstreamExecution(
+            success=True,
+            payload={"jsonrpc": "2.0", "id": payload.get("id"), "result": {"capabilities": {}}},
+            log_payload={"ok": True},
+            error=None,
+        )
+
+    gateway._execute_upstream_operation = fake_execute  # type: ignore[method-assign]
+
+    response_payload, success = asyncio.run(
+        gateway._fanout_initialize(
+            {
+                "jsonrpc": "2.0",
+                "id": "init-1",
+                "method": "initialize",
+                "params": {"protocolVersion": "2099-01-01"},
+            }
+        )
+    )
+
+    assert success is True
+    assert response_payload["result"]["protocolVersion"] == CURRENT_PROTOCOL_VERSION
+    assert seen_versions == [CURRENT_PROTOCOL_VERSION]
+
+
 def test_startup_summary_reports_ready_and_failed_upstreams() -> None:
     config = _config_with_upstreams([_upstream("ready"), _upstream("failed")])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
@@ -1365,6 +1440,74 @@ def test_mcp_post_handler_preserves_batch_order_and_omits_notifications() -> Non
     payload = json.loads(response.body.decode("utf-8"))
     assert [item["id"] for item in payload] == ["1", "2"]
     assert handled_ids == ["1", None, "2"]
+
+
+def test_mcp_post_handler_returns_negotiated_protocol_header_on_initialize() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_json():
+        return {
+            "jsonrpc": "2.0",
+            "id": "init-1",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": CURRENT_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "0.1.0"},
+            },
+        }
+
+    async def fake_handle(payload, request_context):
+        return GatewayResult(
+            payload={
+                "jsonrpc": "2.0",
+                "id": payload.get("id"),
+                "result": {
+                    "protocolVersion": CURRENT_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "serverInfo": {"name": "mcp-gateway", "version": "0.1.0"},
+                },
+            },
+            success=True,
+            cache_hit=False,
+            upstream_id=None,
+            tool_name=None,
+            request_id=UUID("00000000-0000-0000-0000-000000000000"),
+        )
+
+    gateway.handle = fake_handle  # type: ignore[method-assign]
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer secret"},
+        remote="127.0.0.1",
+        json=fake_json,
+    )
+
+    response = asyncio.run(server.mcp_post_handler(request))
+
+    assert response.status == 200
+    assert response.headers["MCP-Protocol-Version"] == CURRENT_PROTOCOL_VERSION
+
+
+def test_mcp_post_handler_rejects_unsupported_protocol_header() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_json():
+        return {"jsonrpc": "2.0", "id": "list-1", "method": "tools/list", "params": {}}
+
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer secret", "MCP-Protocol-Version": "2099-01-01"},
+        remote="127.0.0.1",
+        json=fake_json,
+    )
+
+    response = asyncio.run(server.mcp_post_handler(request))
+
+    assert response.status == 400
+    assert response.text == "Unsupported MCP-Protocol-Version header."
 
 
 def test_error_middleware_maps_gateway_http_errors_to_rest_responses() -> None:
