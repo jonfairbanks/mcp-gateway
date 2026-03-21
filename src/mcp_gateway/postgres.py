@@ -9,6 +9,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from .errors import ConflictError, NotFoundError
+
 
 def _sanitize_role(role: Any) -> Optional[str]:
     if not isinstance(role, str):
@@ -34,6 +36,9 @@ class PostgresStore:
     async def close(self) -> None:
         if self._pool:
             await self._pool.close()
+
+    def is_available(self) -> bool:
+        return self._pool is not None
 
     async def log_request(
         self,
@@ -193,6 +198,57 @@ class PostgresStore:
             cur = await conn.execute("DELETE FROM mcp_cache WHERE expires_at < now()")
             return max(0, cur.rowcount)
 
+    async def consume_rate_limit(
+        self,
+        *,
+        scope_key: str,
+        limit: int,
+        window_seconds: int = 60,
+        now: Optional[datetime] = None,
+    ) -> dict[str, int | bool]:
+        if not self._pool:
+            raise RuntimeError("Postgres is not available")
+        effective_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        window_started_at = effective_now - timedelta(
+            seconds=effective_now.second % window_seconds,
+            microseconds=effective_now.microsecond,
+        )
+        window_ends_at = window_started_at + timedelta(seconds=window_seconds)
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                INSERT INTO gateway_rate_limits (scope_key, window_started_at, request_count, expires_at)
+                VALUES (%s, %s, 1, %s)
+                ON CONFLICT (scope_key, window_started_at)
+                DO UPDATE SET
+                    request_count = gateway_rate_limits.request_count + 1,
+                    expires_at = EXCLUDED.expires_at,
+                    updated_at = now()
+                RETURNING request_count
+                """,
+                (
+                    scope_key,
+                    window_started_at,
+                    window_ends_at,
+                ),
+            )
+            row = await cur.fetchone()
+        assert row is not None
+        request_count = int(row["request_count"])
+        retry_after_seconds = max(1, int((window_ends_at - effective_now).total_seconds()))
+        return {
+            "allowed": request_count <= max(1, limit),
+            "request_count": request_count,
+            "retry_after_seconds": retry_after_seconds,
+        }
+
+    async def cleanup_expired_rate_limits(self) -> int:
+        if not self._pool:
+            return 0
+        async with self._pool.connection() as conn:
+            cur = await conn.execute("DELETE FROM gateway_rate_limits WHERE expires_at < now()")
+            return max(0, cur.rowcount)
+
     async def _ensure_policy_state(self, conn) -> None:
         await conn.execute(
             """
@@ -226,6 +282,14 @@ class PostgresStore:
             WHERE singleton_key = 'default'
             """
         )
+
+    async def _group_exists(self, conn, group_id: str) -> bool:
+        cur = await conn.execute("SELECT 1 FROM gateway_groups WHERE id = %s", (group_id,))
+        return await cur.fetchone() is not None
+
+    async def _user_exists(self, conn, user_id: str) -> bool:
+        cur = await conn.execute("SELECT 1 FROM gateway_users WHERE id = %s", (user_id,))
+        return await cur.fetchone() is not None
 
     @staticmethod
     def _serialize_user_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -552,6 +616,17 @@ class PostgresStore:
         if not self._pool:
             raise RuntimeError("Postgres is not available")
         async with self._pool.connection() as conn:
+            if name is not None:
+                cur = await conn.execute(
+                    """
+                    SELECT 1
+                    FROM gateway_groups
+                    WHERE name = %s AND id <> %s
+                    """,
+                    (name, group_id),
+                )
+                if await cur.fetchone() is not None:
+                    raise ConflictError("A group with that name already exists.")
             cur = await conn.execute(
                 """
                 UPDATE gateway_groups
@@ -599,6 +674,8 @@ class PostgresStore:
         if not self._pool:
             raise RuntimeError("Postgres is not available")
         async with self._pool.connection() as conn:
+            if not await self._group_exists(conn, group_id):
+                raise NotFoundError("Group not found.")
             user_row = await self._ensure_identity_row(conn, subject)
             await conn.execute(
                 """
@@ -656,6 +733,8 @@ class PostgresStore:
         if not self._pool:
             raise RuntimeError("Postgres is not available")
         async with self._pool.connection() as conn:
+            if not await self._group_exists(conn, group_id):
+                raise NotFoundError("Group not found.")
             cur = await conn.execute(
                 """
                 INSERT INTO gateway_group_integration_grants (group_id, upstream_id)
@@ -725,6 +804,8 @@ class PostgresStore:
         if not self._pool:
             raise RuntimeError("Postgres is not available")
         async with self._pool.connection() as conn:
+            if not await self._group_exists(conn, group_id):
+                raise NotFoundError("Group not found.")
             cur = await conn.execute(
                 """
                 INSERT INTO gateway_group_platform_grants (group_id, permission)
@@ -825,6 +906,8 @@ class PostgresStore:
         if not self._pool:
             raise RuntimeError("Postgres is not available")
         async with self._pool.connection() as conn:
+            if not await self._user_exists(conn, user_id):
+                raise NotFoundError("User not found.")
             cur = await conn.execute(
                 """
                 INSERT INTO gateway_api_keys (id, user_id, key_name, key_prefix, key_hash, expires_at)

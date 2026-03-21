@@ -5,15 +5,15 @@ import json
 from types import SimpleNamespace
 from uuid import UUID
 
-from aiohttp import web
-
 from mcp_gateway.config import AppConfig, CacheConfig, GatewayConfig, LoggingConfig, UpstreamConfig
-from mcp_gateway.gateway import Gateway, GatewayResult
+from mcp_gateway.errors import ConflictError, NotFoundError
+from mcp_gateway.gateway import Gateway, GatewayResult, UpstreamExecution
 from mcp_gateway.logging import Logger
 from mcp_gateway.postgres import PostgresStore
+from mcp_gateway.protocol import CURRENT_PROTOCOL_VERSION
 from mcp_gateway.request_context import AuthenticatedPrincipal, RequestContext
 from mcp_gateway.router import build_routes, select_upstream
-from mcp_gateway.server_http import HttpServer, SseSession
+from mcp_gateway.server_http import HttpServer
 from mcp_gateway.telemetry import GatewayTelemetry
 from mcp_gateway.upstreams import UpstreamResponse
 
@@ -27,7 +27,7 @@ def _upstream(
     return UpstreamConfig(
         id=upstream_id,
         name=upstream_id,
-        transport="http_sse",
+        transport="streamable_http",
         endpoint="http://example.com/rpc",
         http_headers={},
         bearer_token_env_var=None,
@@ -61,8 +61,6 @@ def _config_with_upstreams(upstreams: list[UpstreamConfig]) -> AppConfig:
             rate_limit_per_minute=120,
             circuit_breaker_fail_threshold=10,
             circuit_breaker_open_seconds=30,
-            sse_queue_max_messages=100,
-            max_sse_sessions=1000,
         ),
         logging=LoggingConfig(stdout_json=False, extra_redact_fields=[]),
         cache=CacheConfig(enabled=True, max_entries=100, default_ttl_minutes=60, client_scoped_tools=[]),
@@ -477,6 +475,31 @@ def test_client_id_accepts_trusted_proxy_x_client_id() -> None:
     assert server._client_id(request) == "tenant-123"
 
 
+def test_rate_limit_scope_key_prefers_api_key_id_then_user_id_then_subject_then_client_id() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    api_key_context = RequestContext(
+        client_id="client-a",
+        principal=AuthenticatedPrincipal(subject="alice", auth_scheme="postgres_api_key", api_key_id="key-1", user_id="user-1"),
+    )
+    user_context = RequestContext(
+        client_id="client-b",
+        principal=AuthenticatedPrincipal(subject="alice", auth_scheme="postgres_api_key", user_id="user-1"),
+    )
+    subject_context = RequestContext(
+        client_id="client-c",
+        principal=AuthenticatedPrincipal(subject="gateway", auth_scheme="shared_bearer"),
+    )
+    anonymous_context = RequestContext(client_id="client-d")
+
+    assert server._rate_limit_scope_key(api_key_context) == "api_key:key-1"
+    assert server._rate_limit_scope_key(user_context) == "user:user-1"
+    assert server._rate_limit_scope_key(subject_context) == "subject:shared_bearer:gateway"
+    assert server._rate_limit_scope_key(anonymous_context) == "client:client-d"
+
+
 def test_select_upstream_uses_longest_prefix_match() -> None:
     upstreams = [
         _upstream("default", tool_routes=["notion."]),
@@ -723,6 +746,80 @@ def test_warmup_fails_on_duplicate_tool_names() -> None:
     raise AssertionError("warmup should fail on duplicate tool names")
 
 
+def test_fanout_initialize_executes_upstreams_concurrently() -> None:
+    config = _config_with_upstreams([_upstream("one"), _upstream("two"), _upstream("three")])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    active_calls = 0
+    max_active_calls = 0
+    lock = asyncio.Lock()
+
+    async def fake_execute(upstream, method, payload, *, notification=False):
+        nonlocal active_calls, max_active_calls
+        assert method == "initialize"
+        async with lock:
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+        await asyncio.sleep(0.01)
+        async with lock:
+            active_calls -= 1
+        return UpstreamExecution(
+            success=True,
+            payload={"jsonrpc": "2.0", "id": payload.get("id"), "result": {"capabilities": {}, "protocolVersion": CURRENT_PROTOCOL_VERSION}},
+            log_payload={"ok": True},
+            error=None,
+        )
+
+    gateway._execute_upstream_operation = fake_execute  # type: ignore[method-assign]
+
+    response_payload, success = asyncio.run(
+        gateway._fanout_initialize(
+            {
+                "jsonrpc": "2.0",
+                "id": "init-1",
+                "method": "initialize",
+                "params": {"protocolVersion": CURRENT_PROTOCOL_VERSION},
+            }
+        )
+    )
+
+    assert success is True
+    assert response_payload["result"]["protocolVersion"] == CURRENT_PROTOCOL_VERSION
+    assert max_active_calls > 1
+
+
+def test_fanout_initialize_negotiates_latest_supported_version_for_unknown_client_version() -> None:
+    config = _config_with_upstreams([_upstream("one")])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    seen_versions: list[str] = []
+
+    async def fake_execute(upstream, method, payload, *, notification=False):
+        assert method == "initialize"
+        seen_versions.append(payload["params"]["protocolVersion"])
+        return UpstreamExecution(
+            success=True,
+            payload={"jsonrpc": "2.0", "id": payload.get("id"), "result": {"capabilities": {}}},
+            log_payload={"ok": True},
+            error=None,
+        )
+
+    gateway._execute_upstream_operation = fake_execute  # type: ignore[method-assign]
+
+    response_payload, success = asyncio.run(
+        gateway._fanout_initialize(
+            {
+                "jsonrpc": "2.0",
+                "id": "init-1",
+                "method": "initialize",
+                "params": {"protocolVersion": "2099-01-01"},
+            }
+        )
+    )
+
+    assert success is True
+    assert response_payload["result"]["protocolVersion"] == CURRENT_PROTOCOL_VERSION
+    assert seen_versions == [CURRENT_PROTOCOL_VERSION]
+
+
 def test_startup_summary_reports_ready_and_failed_upstreams() -> None:
     config = _config_with_upstreams([_upstream("ready"), _upstream("failed")])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
@@ -763,24 +860,21 @@ def test_startup_summary_reports_ready_and_failed_upstreams() -> None:
     ]
 
 
-def test_enqueue_session_payload_closes_session_when_queue_is_full() -> None:
-    config = _config_with_upstreams([_upstream()])
-    config.gateway.sse_queue_max_messages = 1
+def test_gateway_is_not_ready_when_initialize_succeeds_but_tools_list_fails() -> None:
+    config = _config_with_upstreams([_upstream("degraded")])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
-    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+    gateway._warmup_status = {
+        "degraded": {
+            "initialize_success": True,
+            "initialize_error": None,
+            "tools_list_success": False,
+            "tools_list_error": {"message": "downstream unavailable"},
+            "tool_count": 0,
+            "tools": [],
+        }
+    }
 
-    async def write_eof() -> None:
-        return None
-
-    session = SseSession(SimpleNamespace(write_eof=write_eof), max_messages=1)
-    session.queue.put_nowait("existing")
-    server._sessions["session-1"] = session
-
-    enqueued = asyncio.run(server._enqueue_session_payload("session-1", "later"))
-
-    assert enqueued is False
-    assert "session-1" not in server._sessions
-    assert session.closed is True
+    assert gateway.is_ready() is False
 
 
 def test_preflight_request_rejects_unauthorized_requests() -> None:
@@ -865,19 +959,17 @@ def test_parse_json_request_rejects_invalid_json() -> None:
     assert response.status == 400
 
 
-def test_sse_handler_rejects_when_session_capacity_is_exceeded() -> None:
+def test_mcp_get_handler_returns_method_not_allowed() -> None:
     config = _config_with_upstreams([_upstream()])
-    config.gateway.max_sse_sessions = 1
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
     server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
-    server._sessions["existing"] = SseSession(SimpleNamespace(write_eof=lambda: None), max_messages=1)
 
-    request = SimpleNamespace(headers={"Authorization": "Bearer secret"}, remote="127.0.0.1")
+    request = SimpleNamespace()
 
-    response = asyncio.run(server.sse_handler(request))
+    response = asyncio.run(server.mcp_get_handler(request))
 
-    assert isinstance(response, web.Response)
-    assert response.status == 503
+    assert response.status == 405
+    assert response.headers["Allow"] == "POST"
 
 
 def test_standard_user_cannot_call_tools_without_grants() -> None:
@@ -1253,21 +1345,16 @@ def test_admin_groups_list_handler_requires_group_read_permission() -> None:
     assert payload["error"]["data"]["permission"] == "admin.groups.read"
 
 
-def test_message_handler_returns_retryable_error_when_session_queue_is_full() -> None:
+def test_mcp_post_handler_returns_accepted_for_notification_batches() -> None:
     config = _config_with_upstreams([_upstream()])
-    config.gateway.sse_queue_max_messages = 1
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
     server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
 
-    async def write_eof() -> None:
-        return None
-
-    session = SseSession(SimpleNamespace(write_eof=write_eof), max_messages=1)
-    session.queue.put_nowait("existing")
-    server._sessions["session-1"] = session
-
     async def fake_json():
-        return {"jsonrpc": "2.0", "id": "1", "method": "tools/list", "params": {}}
+        return [
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            {"jsonrpc": "2.0", "method": "ping"},
+        ]
 
     async def fake_handle(payload, request_context):
         assert request_context.client_id == "127.0.0.1"
@@ -1275,7 +1362,7 @@ def test_message_handler_returns_retryable_error_when_session_queue_is_full() ->
         assert request_context.principal.subject == "gateway"
         assert request_context.principal.auth_scheme == "shared_bearer"
         return GatewayResult(
-            payload={"jsonrpc": "2.0", "id": "1", "result": {"ok": True}},
+            payload={"jsonrpc": "2.0", "id": payload.get("id"), "result": {"ok": True}},
             success=True,
             cache_hit=False,
             upstream_id="notion",
@@ -1287,11 +1374,181 @@ def test_message_handler_returns_retryable_error_when_session_queue_is_full() ->
     request = SimpleNamespace(
         headers={"Authorization": "Bearer secret"},
         remote="127.0.0.1",
-        query={"session_id": "session-1"},
         json=fake_json,
     )
 
-    response = asyncio.run(server.message_handler(request))
+    response = asyncio.run(server.mcp_post_handler(request))
 
-    assert response.status == 503
-    assert "session-1" not in server._sessions
+    assert response.status == 202
+
+
+def test_mcp_post_handler_returns_invalid_request_for_empty_batch() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_json():
+        return []
+
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer secret"},
+        remote="127.0.0.1",
+        json=fake_json,
+    )
+
+    response = asyncio.run(server.mcp_post_handler(request))
+
+    assert response.status == 400
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["error"]["code"] == -32600
+
+
+def test_mcp_post_handler_preserves_batch_order_and_omits_notifications() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+    handled_ids: list[str | None] = []
+
+    async def fake_json():
+        return [
+            {"jsonrpc": "2.0", "id": "1", "method": "tools/list", "params": {}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            {"jsonrpc": "2.0", "id": "2", "method": "tools/list", "params": {}},
+        ]
+
+    async def fake_handle(payload, request_context):
+        handled_ids.append(payload.get("id"))
+        return GatewayResult(
+            payload={"jsonrpc": "2.0", "id": payload.get("id"), "result": {"id": payload.get("id")}},
+            success=True,
+            cache_hit=False,
+            upstream_id="notion",
+            tool_name=None,
+            request_id=UUID("00000000-0000-0000-0000-000000000000"),
+        )
+
+    gateway.handle = fake_handle  # type: ignore[method-assign]
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer secret"},
+        remote="127.0.0.1",
+        json=fake_json,
+    )
+
+    response = asyncio.run(server.mcp_post_handler(request))
+
+    assert response.status == 200
+    payload = json.loads(response.body.decode("utf-8"))
+    assert [item["id"] for item in payload] == ["1", "2"]
+    assert handled_ids == ["1", None, "2"]
+
+
+def test_mcp_post_handler_returns_negotiated_protocol_header_on_initialize() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_json():
+        return {
+            "jsonrpc": "2.0",
+            "id": "init-1",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": CURRENT_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "0.1.0"},
+            },
+        }
+
+    async def fake_handle(payload, request_context):
+        return GatewayResult(
+            payload={
+                "jsonrpc": "2.0",
+                "id": payload.get("id"),
+                "result": {
+                    "protocolVersion": CURRENT_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "serverInfo": {"name": "mcp-gateway", "version": "0.1.0"},
+                },
+            },
+            success=True,
+            cache_hit=False,
+            upstream_id=None,
+            tool_name=None,
+            request_id=UUID("00000000-0000-0000-0000-000000000000"),
+        )
+
+    gateway.handle = fake_handle  # type: ignore[method-assign]
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer secret"},
+        remote="127.0.0.1",
+        json=fake_json,
+    )
+
+    response = asyncio.run(server.mcp_post_handler(request))
+
+    assert response.status == 200
+    assert response.headers["MCP-Protocol-Version"] == CURRENT_PROTOCOL_VERSION
+
+
+def test_mcp_post_handler_rejects_unsupported_protocol_header() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_json():
+        return {"jsonrpc": "2.0", "id": "list-1", "method": "tools/list", "params": {}}
+
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer secret", "MCP-Protocol-Version": "2099-01-01"},
+        remote="127.0.0.1",
+        json=fake_json,
+    )
+
+    response = asyncio.run(server.mcp_post_handler(request))
+
+    assert response.status == 400
+    assert response.text == "Unsupported MCP-Protocol-Version header."
+
+
+def test_error_middleware_maps_gateway_http_errors_to_rest_responses() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    logger = RecordingLogger()
+    server = HttpServer(config, gateway, logger, GatewayTelemetry())
+    request = SimpleNamespace(path="/v1/admin/groups")
+
+    async def failing_handler(_request):
+        raise NotFoundError("Group not found.")
+
+    response = asyncio.run(server._error_middleware(request, failing_handler))
+
+    assert response.status == 404
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload == {"error": "NotFound", "message": "Group not found."}
+    assert logger.warnings == [
+        (
+            "http_service_error",
+            {
+                "endpoint": "/v1/admin/groups",
+                "status": 404,
+                "error": "NotFound",
+                "message": "Group not found.",
+            },
+        )
+    ]
+
+
+def test_error_middleware_maps_conflicts_to_rest_responses() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, RecordingLogger(), GatewayTelemetry())
+    request = SimpleNamespace(path="/v1/admin/groups")
+
+    async def failing_handler(_request):
+        raise ConflictError("A group with that name already exists.")
+
+    response = asyncio.run(server._error_middleware(request, failing_handler))
+
+    assert response.status == 409
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload == {"error": "Conflict", "message": "A group with that name already exists."}

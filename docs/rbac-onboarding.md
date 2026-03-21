@@ -1,6 +1,6 @@
 # RBAC Onboarding
 
-This document explains how to set up access control for `mcp-gateway` when `gateway.auth_mode` is `postgres_api_keys`.
+This guide is for operators who are deploying `mcp-gateway` in `postgres_api_keys` mode and need to grant different users access to different integrations.
 
 ## Model
 
@@ -84,6 +84,11 @@ Use this order on a fresh deployment:
 7. Add that user's subject to the group.
 8. Grant one or more integrations to the group.
 9. Test with that user's API key.
+
+This is the simplest mental model:
+
+- auth answers "who is this caller?"
+- RBAC answers "which integrations and admin APIs can they use?"
 
 ## Example: Sales Can Only Use Jira
 
@@ -222,6 +227,7 @@ If the tool is not allowed, the gateway returns a JSON-RPC error with:
 - `GET /tools` and `tools/list` are not an authorization test; `tools/call` is.
 - `deny_tools` in upstream config can still block specific tools even when the group has the upstream grant.
 - If `/v1/admin/groups` is empty after applying the schema, that is normal. No groups are seeded automatically.
+- upstream ids in grants must match the configured `upstreams[].id` values exactly.
 
 ## Postman
 

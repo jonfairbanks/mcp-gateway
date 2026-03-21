@@ -1,6 +1,8 @@
 # Configuration Reference
 
-This file documents `config.yaml` for `mcp-gateway`.
+This document describes the deployment-time configuration surface for `mcp-gateway`.
+
+Use it together with [`config.example.yaml`](../config.example.yaml) when building a production config.
 
 ## Top-level
 
@@ -15,6 +17,12 @@ String values support explicit env interpolation:
 
 - `${NAME}` requires the environment variable to be set
 - `${NAME:-default}` uses `default` when the variable is unset or empty
+
+Operational guidance:
+
+- use env refs for secrets, tokens, and API keys
+- keep `env` and `http_headers` as YAML mappings, not lists
+- prefer explicit `name` values only when they help operators; otherwise `id` is enough
 
 ## `gateway`
 
@@ -31,8 +39,12 @@ String values support explicit env interpolation:
 - `rate_limit_per_minute` default `120`
 - `circuit_breaker_fail_threshold` default `20`
 - `circuit_breaker_open_seconds` default `30`
-- `sse_queue_max_messages` default `100`
-- `max_sse_sessions` default `1000`
+
+Deployment notes:
+
+- `auth_mode: single_shared` is the simplest deployment path
+- `auth_mode: postgres_api_keys` is the correct mode for multi-user deployments
+- `allow_unauthenticated: true` should be treated as a public exposure setting
 
 ## `logging`
 
@@ -47,6 +59,8 @@ String values support explicit env interpolation:
 - `client_scoped_tools` default `[]`
 
 `client_scoped_tools` means cache keys for listed tools include `client_id` so users do not share cached results.
+
+The in-memory cache is only a local optimization. Shared cache correctness comes from Postgres.
 
 ## Management APIs
 
@@ -87,7 +101,7 @@ Role behavior:
 Required:
 
 - `id`
-- `transport` (`stdio` or `http_sse`)
+- `transport` (`stdio` or `streamable_http`)
 
 Common:
 
@@ -100,20 +114,33 @@ Common:
 - `circuit_breaker_fail_threshold` optional override
 - `circuit_breaker_open_seconds` optional override
 
+Operator guidance:
+
+- choose stable `id` values because RBAC integration grants use upstream `id`
+- set `tool_routes` when you want routing to stay predictable across similarly named integrations
+- use per-upstream breaker and timeout overrides for slower or less reliable vendors
+
 ### `stdio` upstream fields
 
 - `command` string or string list
 - `args` optional list, appended to `command`
-- `env` optional map
+- `env` optional map of environment variables
 - `cwd` optional working directory
 - `stdio_read_limit_bytes` default `104857600` (100 MB)
 
-### `http_sse` upstream fields
+Use `stdio` when the upstream MCP is installed locally on each gateway replica.
+
+### `streamable_http` upstream fields
 
 - `endpoint` JSON-RPC HTTP endpoint
 - `http_headers` optional static headers
 - `bearer_token_env_var` optional env var name used if `Authorization` is not provided in `http_headers`
 - `http_serialize_requests` default `false` (concurrent HTTP calls enabled). Set `true` to force one-at-a-time requests for that upstream.
+- Only MCP protocol version `2025-11-25` is supported by the gateway. Older protocol versions are rejected.
+
+Use `streamable_http` when the upstream MCP is already exposed over HTTP.
+
+If both `http_headers.Authorization` and `bearer_token_env_var` are set, the explicit `Authorization` header wins.
 
 ## Example
 
@@ -126,8 +153,6 @@ gateway:
   bootstrap_admin_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY:-}"
   allow_unauthenticated: false
   public_tools_catalog: false
-  sse_queue_max_messages: 100
-  max_sse_sessions: 1000
 
 logging:
   stdout_json: true
@@ -159,18 +184,27 @@ upstreams:
       - "--no-usage-statistics"
     deny_tools: []
 
-  - id: "notion-sse"
-    name: "notion-sse"
-    transport: "http_sse"
-    endpoint: "https://mcp.notion.com/mcp"
+  - id: "github"
+    name: "github"
+    transport: "streamable_http"
+    endpoint: "https://api.githubcopilot.com/mcp/"
     http_serialize_requests: false
-    http_headers:
-      Notion-Version: "2022-06-28"
-    bearer_token_env_var: "NOTION_TOKEN"
+    bearer_token_env_var: "GITHUB_PAT_TOKEN"
     timeout_ms: 30000
     deny_tools:
-      - "API-post-page"
-      - "API-patch-page"
+      - "create_or_update_file"
+      - "delete_file"
     tool_routes:
-      - "API-"
+      - "github."
 ```
+
+## Validation Rules
+
+Common validation failures:
+
+- `upstreams[].transport` must be `stdio` or `streamable_http`
+- `upstreams[].env` must be a YAML mapping
+- `upstreams[].http_headers` must be a YAML mapping
+- `bearer_token_env_var` must be a valid environment variable name
+- `command` must be a string or list of strings
+- `args` must be a list
