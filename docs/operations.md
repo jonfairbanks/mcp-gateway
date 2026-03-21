@@ -23,6 +23,24 @@ sum by (upstream_id) (
 )
 ```
 
+## Tracing
+
+Tracing is off by default. The gateway emits OpenTelemetry spans when standard OTEL exporter environment variables are present.
+
+Common setup:
+
+- `OTEL_TRACES_EXPORTER=otlp`
+- `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318`
+- optional: `OTEL_SERVICE_NAME=mcp-gateway`
+
+When enabled, the gateway emits spans for:
+
+- incoming HTTP requests
+- MCP method handling inside the gateway
+- outbound upstream calls
+
+For `streamable_http` upstreams, the current trace context is propagated on outbound requests with standard trace headers.
+
 ## Logs
 
 Structured logs include upstream and tool-level detail. If an upstream fails warmup or a tool call is denied, the logs are usually the fastest source of detail.

@@ -842,66 +842,75 @@ class Gateway:
         *,
         notification: bool = False,
     ) -> UpstreamExecution:
-        try:
+        with self._telemetry.start_upstream_span(upstream.id, upstream.transport, method, notification=notification):
+            try:
+                if notification:
+                    await self._notify_upstream(upstream, payload)
+                    accepted = {"accepted": True}
+                    self._telemetry.annotate_upstream_result(success=True)
+                    return UpstreamExecution(success=True, payload=accepted, log_payload=accepted, error=None)
+
+                response = await self._call_upstream(upstream, payload)
+                error = response.payload.get("error")
+                self._telemetry.annotate_upstream_result(
+                    success=response.success,
+                    error=error if isinstance(error, dict) else None,
+                )
+                return UpstreamExecution(
+                    success=response.success,
+                    payload=response.payload,
+                    log_payload=response.payload,
+                    error=error if isinstance(error, dict) else None,
+                )
+            except asyncio.TimeoutError as exc:
+                error = {"code": -32002, "message": "Upstream timeout"}
+                self._telemetry.annotate_exception(exc)
+                self._log_upstream_exception(
+                    upstream.id,
+                    method,
+                    error["code"],
+                    error["message"],
+                    exc,
+                    notification=notification,
+                )
+            except RuntimeError as exc:
+                error = {"code": -32004, "message": "Upstream unavailable"}
+                self._telemetry.annotate_exception(exc)
+                self._log_upstream_exception(
+                    upstream.id,
+                    method,
+                    error["code"],
+                    error["message"],
+                    exc,
+                    notification=notification,
+                )
+            except Exception as exc:  # noqa: BLE001
+                error = {"code": -32003, "message": "Upstream request failed"}
+                self._telemetry.annotate_exception(exc)
+                self._log_upstream_exception(
+                    upstream.id,
+                    method,
+                    error["code"],
+                    error["message"],
+                    exc,
+                    notification=notification,
+                )
+
             if notification:
-                await self._notify_upstream(upstream, payload)
-                accepted = {"accepted": True}
-                return UpstreamExecution(success=True, payload=accepted, log_payload=accepted, error=None)
+                return UpstreamExecution(
+                    success=False,
+                    payload={"accepted": False},
+                    log_payload={"accepted": False, "error": error},
+                    error=error,
+                )
 
-            response = await self._call_upstream(upstream, payload)
-            error = response.payload.get("error")
-            return UpstreamExecution(
-                success=response.success,
-                payload=response.payload,
-                log_payload=response.payload,
-                error=error if isinstance(error, dict) else None,
-            )
-        except asyncio.TimeoutError as exc:
-            error = {"code": -32002, "message": "Upstream timeout"}
-            self._log_upstream_exception(
-                upstream.id,
-                method,
-                error["code"],
-                error["message"],
-                exc,
-                notification=notification,
-            )
-        except RuntimeError as exc:
-            error = {"code": -32004, "message": "Upstream unavailable"}
-            self._log_upstream_exception(
-                upstream.id,
-                method,
-                error["code"],
-                error["message"],
-                exc,
-                notification=notification,
-            )
-        except Exception as exc:  # noqa: BLE001
-            error = {"code": -32003, "message": "Upstream request failed"}
-            self._log_upstream_exception(
-                upstream.id,
-                method,
-                error["code"],
-                error["message"],
-                exc,
-                notification=notification,
-            )
-
-        if notification:
+            error_payload = make_error_response(payload.get("id"), error["code"], error["message"])
             return UpstreamExecution(
                 success=False,
-                payload={"accepted": False},
-                log_payload={"accepted": False, "error": error},
+                payload=error_payload,
+                log_payload=error_payload,
                 error=error,
             )
-
-        error_payload = make_error_response(payload.get("id"), error["code"], error["message"])
-        return UpstreamExecution(
-            success=False,
-            payload=error_payload,
-            log_payload=error_payload,
-            error=error,
-        )
 
     async def _load_cached_response(self, cache_key: str, request_id: UUID) -> Optional[Dict[str, Any]]:
         cached = await self._memory_cache.get(cache_key)
@@ -997,6 +1006,16 @@ class Gateway:
             latency_ms=latency_ms,
             upstream_id=upstream_id,
             tool_name=tool_name,
+        )
+        self._telemetry.annotate_mcp_result(
+            request_id=str(request_id),
+            method=method,
+            success=success,
+            cache_hit=cache_hit,
+            latency_ms=latency_ms,
+            upstream_id=upstream_id,
+            tool_name=tool_name,
+            error=error,
         )
         return GatewayResult(
             payload=response_payload,
@@ -1310,139 +1329,181 @@ class Gateway:
         method = payload.get("method")
         params = payload.get("params")
         client_id = request_context.client_id
-        if not isinstance(method, str):
-            error_payload = make_error_response(payload.get("id"), -32600, "Invalid Request")
-            return await self._finalize_request(
-                request_id=request_id,
-                method="invalid",
-                response_payload=error_payload,
-                success=False,
-                cache_hit=False,
-                latency_ms=0,
-                upstream_id=None,
-                tool_name=None,
-                log_response=False,
-                error=error_payload.get("error"),
-            )
-        self._telemetry.record_request(method)
-
-        if method == "initialize":
-            await self._log_request_start(
-                request_id=request_id,
-                method=method,
-                params=params,
-                raw_request=payload,
-                upstream_id="*",
-                tool_name=None,
-                request_context=request_context,
-                cache_key=None,
-            )
-            timer = Timer()
-            response_payload, success = await self._fanout_initialize(payload)
-            return await self._finalize_request(
-                request_id=request_id,
-                method=method,
-                response_payload=response_payload,
-                success=success,
-                cache_hit=False,
-                latency_ms=timer.elapsed_ms(),
-                upstream_id="*",
-                tool_name=None,
-                error=response_payload.get("error") if isinstance(response_payload.get("error"), dict) else None,
-            )
-
-        if method == "notifications/initialized" and payload.get("id") is None:
-            await self._log_request_start(
-                request_id=request_id,
-                method=method,
-                params=params,
-                raw_request=payload,
-                upstream_id="*",
-                tool_name=None,
-                request_context=request_context,
-                cache_key=None,
-            )
-            timer = Timer()
-            success = await self._fanout_initialized_notification(payload)
-            latency_ms = timer.elapsed_ms()
-            response_payload = {"accepted": success}
-            return await self._finalize_request(
-                request_id=request_id,
-                method=method,
-                response_payload=response_payload,
-                success=success,
-                cache_hit=False,
-                latency_ms=latency_ms,
-                upstream_id="*",
-                tool_name=None,
-            )
-
-        routed = await self._route_request(payload, method, params, client_id)
-        if not routed.upstream:
-            error_payload = make_error_response(payload.get("id"), -32000, "No upstream configured")
-            return await self._finalize_request(
-                request_id=request_id,
-                method=method,
-                response_payload=error_payload,
-                success=False,
-                cache_hit=False,
-                latency_ms=0,
-                upstream_id=None,
-                tool_name=routed.tool_name,
-                log_response=False,
-                error=error_payload.get("error"),
-            )
-        await self._log_request_start(
-            request_id=request_id,
-            method=method,
-            params=routed.params,
-            raw_request=routed.payload,
-            upstream_id=routed.upstream.id,
-            tool_name=routed.tool_name,
-            request_context=request_context,
-            cache_key=routed.cache_key,
-            requested_tool_name=routed.requested_tool_name,
-        )
-
-        if method in DISCOVERY_METHODS:
-            timer = Timer()
-            response_payload, success, upstream_errors = await self._aggregate_list(routed.payload, method)
-            return await self._finalize_request(
-                request_id=request_id,
-                method=method,
-                response_payload=response_payload,
-                success=success,
-                cache_hit=False,
-                latency_ms=timer.elapsed_ms(),
-                upstream_id="*",
-                tool_name=None,
-                error=response_payload.get("error") if isinstance(response_payload.get("error"), dict) else None,
-                extra_log_fields={
-                    "upstream_error_count": len(upstream_errors),
-                    "upstream_errors": upstream_errors,
-                },
-            )
-
-        if method == "tools/call" and (request_context.principal is not None or self.auth_required()):
-            authorized = await self.authorize_integration(request_context.principal, routed.upstream.id)
-            if not authorized:
-                principal = request_context.principal
-                denial_reason = (
-                    f"Principal '{principal.subject if principal else 'anonymous'}' is not allowed to call "
-                    f"integration '{routed.upstream.id}'"
+        method_name = method if isinstance(method, str) else "invalid"
+        principal = request_context.principal
+        with self._telemetry.start_mcp_span(
+            method_name,
+            str(request_id),
+            client_id=client_id,
+            auth_subject=principal.subject if principal else None,
+        ):
+            if not isinstance(method, str):
+                error_payload = make_error_response(payload.get("id"), -32600, "Invalid Request")
+                return await self._finalize_request(
+                    request_id=request_id,
+                    method="invalid",
+                    response_payload=error_payload,
+                    success=False,
+                    cache_hit=False,
+                    latency_ms=0,
+                    upstream_id=None,
+                    tool_name=None,
+                    log_response=False,
+                    error=error_payload.get("error"),
                 )
+            self._telemetry.record_request(method)
+
+            if method == "initialize":
+                await self._log_request_start(
+                    request_id=request_id,
+                    method=method,
+                    params=params,
+                    raw_request=payload,
+                    upstream_id="*",
+                    tool_name=None,
+                    request_context=request_context,
+                    cache_key=None,
+                )
+                timer = Timer()
+                response_payload, success = await self._fanout_initialize(payload)
+                return await self._finalize_request(
+                    request_id=request_id,
+                    method=method,
+                    response_payload=response_payload,
+                    success=success,
+                    cache_hit=False,
+                    latency_ms=timer.elapsed_ms(),
+                    upstream_id="*",
+                    tool_name=None,
+                    error=response_payload.get("error") if isinstance(response_payload.get("error"), dict) else None,
+                )
+
+            if method == "notifications/initialized" and payload.get("id") is None:
+                await self._log_request_start(
+                    request_id=request_id,
+                    method=method,
+                    params=params,
+                    raw_request=payload,
+                    upstream_id="*",
+                    tool_name=None,
+                    request_context=request_context,
+                    cache_key=None,
+                )
+                timer = Timer()
+                success = await self._fanout_initialized_notification(payload)
+                latency_ms = timer.elapsed_ms()
+                response_payload = {"accepted": success}
+                return await self._finalize_request(
+                    request_id=request_id,
+                    method=method,
+                    response_payload=response_payload,
+                    success=success,
+                    cache_hit=False,
+                    latency_ms=latency_ms,
+                    upstream_id="*",
+                    tool_name=None,
+                )
+
+            routed = await self._route_request(payload, method, params, client_id)
+            if not routed.upstream:
+                error_payload = make_error_response(payload.get("id"), -32000, "No upstream configured")
+                return await self._finalize_request(
+                    request_id=request_id,
+                    method=method,
+                    response_payload=error_payload,
+                    success=False,
+                    cache_hit=False,
+                    latency_ms=0,
+                    upstream_id=None,
+                    tool_name=routed.tool_name,
+                    log_response=False,
+                    error=error_payload.get("error"),
+                )
+            await self._log_request_start(
+                request_id=request_id,
+                method=method,
+                params=routed.params,
+                raw_request=routed.payload,
+                upstream_id=routed.upstream.id,
+                tool_name=routed.tool_name,
+                request_context=request_context,
+                cache_key=routed.cache_key,
+                requested_tool_name=routed.requested_tool_name,
+            )
+
+            if method in DISCOVERY_METHODS:
+                timer = Timer()
+                response_payload, success, upstream_errors = await self._aggregate_list(routed.payload, method)
+                return await self._finalize_request(
+                    request_id=request_id,
+                    method=method,
+                    response_payload=response_payload,
+                    success=success,
+                    cache_hit=False,
+                    latency_ms=timer.elapsed_ms(),
+                    upstream_id="*",
+                    tool_name=None,
+                    error=response_payload.get("error") if isinstance(response_payload.get("error"), dict) else None,
+                    extra_log_fields={
+                        "upstream_error_count": len(upstream_errors),
+                        "upstream_errors": upstream_errors,
+                    },
+                )
+
+            if method == "tools/call" and (request_context.principal is not None or self.auth_required()):
+                authorized = await self.authorize_integration(request_context.principal, routed.upstream.id)
+                if not authorized:
+                    principal = request_context.principal
+                    denial_reason = (
+                        f"Principal '{principal.subject if principal else 'anonymous'}' is not allowed to call "
+                        f"integration '{routed.upstream.id}'"
+                    )
+                    denial_payload = make_error_response(
+                        routed.payload.get("id"),
+                        -32001,
+                        "Blocked by gateway policy: integration not allowed",
+                        data={
+                            "category": "policy_denied",
+                            "enforcer": "pycasbin",
+                            "subject": principal.subject if principal else None,
+                            "upstream_id": routed.upstream.id,
+                            "tool_name": routed.tool_name,
+                            "retryable": False,
+                            "suggestion": "Use an allowed integration grant or contact gateway admin to update access.",
+                        },
+                    )
+                    denial_id = uuid4()
+                    await self._safe_log_denial(denial_id, request_id, routed.upstream.id, routed.tool_name, denial_reason)
+                    self._telemetry.record_denial(routed.upstream.id, routed.tool_name)
+                    return await self._finalize_request(
+                        request_id=request_id,
+                        method=method,
+                        response_payload=denial_payload,
+                        success=False,
+                        cache_hit=False,
+                        latency_ms=0,
+                        upstream_id=routed.upstream.id,
+                        tool_name=routed.tool_name,
+                        log_response=False,
+                        event_name="mcp_denied",
+                        error=denial_payload.get("error"),
+                        extra_log_fields={"reason": denial_reason},
+                    )
+
+            denial_reason = self._deny(routed.upstream, routed.tool_name)
+            if denial_reason:
                 denial_payload = make_error_response(
                     routed.payload.get("id"),
                     -32001,
-                    "Blocked by gateway policy: integration not allowed",
+                    "Blocked by gateway policy: tool not allowed",
                     data={
                         "category": "policy_denied",
-                        "enforcer": "pycasbin",
-                        "subject": principal.subject if principal else None,
+                        "enforcer": "mcp-gateway",
                         "upstream_id": routed.upstream.id,
                         "tool_name": routed.tool_name,
+                        "policy_type": "deny_tools",
                         "retryable": False,
-                        "suggestion": "Use an allowed integration grant or contact gateway admin to update access.",
+                        "suggestion": "Use an allowed tool or contact gateway admin to update deny_tools policy.",
                     },
                 )
                 denial_id = uuid4()
@@ -1463,50 +1524,47 @@ class Gateway:
                     extra_log_fields={"reason": denial_reason},
                 )
 
-        denial_reason = self._deny(routed.upstream, routed.tool_name)
-        if denial_reason:
-            denial_payload = make_error_response(
-                routed.payload.get("id"),
-                -32001,
-                "Blocked by gateway policy: tool not allowed",
-                data={
-                    "category": "policy_denied",
-                    "enforcer": "mcp-gateway",
-                    "upstream_id": routed.upstream.id,
-                    "tool_name": routed.tool_name,
-                    "policy_type": "deny_tools",
-                    "retryable": False,
-                    "suggestion": "Use an allowed tool or contact gateway admin to update deny_tools policy.",
-                },
-            )
-            denial_id = uuid4()
-            await self._safe_log_denial(denial_id, request_id, routed.upstream.id, routed.tool_name, denial_reason)
-            self._telemetry.record_denial(routed.upstream.id, routed.tool_name)
-            return await self._finalize_request(
-                request_id=request_id,
-                method=method,
-                response_payload=denial_payload,
-                success=False,
-                cache_hit=False,
-                latency_ms=0,
-                upstream_id=routed.upstream.id,
-                tool_name=routed.tool_name,
-                log_response=False,
-                event_name="mcp_denied",
-                error=denial_payload.get("error"),
-                extra_log_fields={"reason": denial_reason},
-            )
+            if routed.payload.get("id") is None:
+                timer = Timer()
+                execution = await self._execute_upstream_operation(
+                    routed.upstream,
+                    method,
+                    routed.payload,
+                    notification=True,
+                )
+                await self._record_health(routed.upstream.id, method, execution.success)
+                return await self._finalize_request(
+                    request_id=request_id,
+                    method=method,
+                    response_payload=execution.payload,
+                    success=execution.success,
+                    cache_hit=False,
+                    latency_ms=timer.elapsed_ms(),
+                    upstream_id=routed.upstream.id,
+                    tool_name=routed.tool_name,
+                    store_payload=execution.log_payload,
+                    error=execution.error,
+                )
 
-        if routed.payload.get("id") is None:
+            if routed.cache_key:
+                timer = Timer()
+                cached = await self._load_cached_response(routed.cache_key, request_id)
+                if cached is not None:
+                    return await self._finalize_request(
+                        request_id=request_id,
+                        method=method,
+                        response_payload=cached,
+                        success=True,
+                        cache_hit=True,
+                        latency_ms=timer.elapsed_ms(),
+                        upstream_id=routed.upstream.id,
+                        tool_name=routed.tool_name,
+                    )
+
             timer = Timer()
-            execution = await self._execute_upstream_operation(
-                routed.upstream,
-                method,
-                routed.payload,
-                notification=True,
-            )
+            execution = await self._execute_upstream_operation(routed.upstream, method, routed.payload)
             await self._record_health(routed.upstream.id, method, execution.success)
-            return await self._finalize_request(
+            result = await self._finalize_request(
                 request_id=request_id,
                 method=method,
                 response_payload=execution.payload,
@@ -1518,39 +1576,8 @@ class Gateway:
                 store_payload=execution.log_payload,
                 error=execution.error,
             )
-
-        if routed.cache_key:
-            timer = Timer()
-            cached = await self._load_cached_response(routed.cache_key, request_id)
-            if cached is not None:
-                return await self._finalize_request(
-                    request_id=request_id,
-                    method=method,
-                    response_payload=cached,
-                    success=True,
-                    cache_hit=True,
-                    latency_ms=timer.elapsed_ms(),
-                    upstream_id=routed.upstream.id,
-                    tool_name=routed.tool_name,
-                )
-
-        timer = Timer()
-        execution = await self._execute_upstream_operation(routed.upstream, method, routed.payload)
-        await self._record_health(routed.upstream.id, method, execution.success)
-        result = await self._finalize_request(
-            request_id=request_id,
-            method=method,
-            response_payload=execution.payload,
-            success=execution.success,
-            cache_hit=False,
-            latency_ms=timer.elapsed_ms(),
-            upstream_id=routed.upstream.id,
-            tool_name=routed.tool_name,
-            store_payload=execution.log_payload,
-            error=execution.error,
-        )
-        if routed.cache_key and execution.success:
-            ttl_seconds = self._cache_ttl_seconds(routed.upstream)
-            await self._memory_cache.set(routed.cache_key, execution.payload, ttl_seconds)
-            await self._safe_cache_set(routed.cache_key, execution.payload, ttl_seconds, request_id)
-        return result
+            if routed.cache_key and execution.success:
+                ttl_seconds = self._cache_ttl_seconds(routed.upstream)
+                await self._memory_cache.set(routed.cache_key, execution.payload, ttl_seconds)
+                await self._safe_cache_set(routed.cache_key, execution.payload, ttl_seconds, request_id)
+            return result

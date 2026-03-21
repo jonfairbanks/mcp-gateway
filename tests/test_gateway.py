@@ -5,6 +5,10 @@ import json
 from types import SimpleNamespace
 from uuid import UUID
 
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
 from mcp_gateway.config import AppConfig, CacheConfig, GatewayConfig, LoggingConfig, UpstreamConfig
 from mcp_gateway.errors import ConflictError, NotFoundError
 from mcp_gateway.gateway import Gateway, GatewayResult, UpstreamExecution
@@ -181,6 +185,36 @@ def test_cache_key_treats_progress_token_only_meta_as_absent() -> None:
     key_a = gateway._cache_key(upstream, "tools/call", "query-docs", params_a, None)
     key_b = gateway._cache_key(upstream, "tools/call", "query-docs", params_b, None)
     assert key_a == key_b
+
+
+def test_discovery_upstream_spans_are_children_of_mcp_span() -> None:
+    config = _config_with_upstreams([_upstream("context7")])
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    telemetry = GatewayTelemetry(tracer_provider=provider)
+    gateway = Gateway(config, RecordingStore(), Logger(stdout_json=False), telemetry)
+
+    async def fake_call_upstream(_upstream_config, _payload):
+        return UpstreamResponse(payload={"jsonrpc": "2.0", "id": "1", "result": {"tools": []}}, success=True)
+
+    gateway._call_upstream = fake_call_upstream
+
+    result = asyncio.run(
+        gateway.handle(
+            {"jsonrpc": "2.0", "id": "1", "method": "tools/list", "params": {}},
+            RequestContext(client_id="127.0.0.1"),
+        )
+    )
+
+    assert result.success is True
+    spans = exporter.get_finished_spans()
+    mcp_span = next(span for span in spans if span.name == "mcp.tools/list")
+    upstream_span = next(span for span in spans if span.name == "upstream.context7.tools/list")
+
+    assert upstream_span.parent is not None
+    assert upstream_span.parent.span_id == mcp_span.context.span_id
+    assert mcp_span.attributes["mcp.method"] == "tools/list"
 
 
 def test_http_auth_header_parsing() -> None:

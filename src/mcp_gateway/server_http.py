@@ -125,6 +125,18 @@ class HttpServer:
                 return web.json_response(make_error_response(None, -32603, "Internal error"), status=500)
             return self._rest_error(500, "InternalError", "Unexpected server error.")
 
+    @web.middleware
+    async def _tracing_middleware(self, request: web.Request, handler):
+        context = self._telemetry.extract_context(request.headers)
+        with self._telemetry.start_http_server_span(request.method, request.path, context=context):
+            try:
+                response = await handler(request)
+            except Exception as exc:  # noqa: BLE001
+                self._telemetry.annotate_exception(exc)
+                raise
+            self._telemetry.annotate_http_response(response.status)
+            return response
+
     def _normalize_role(self, role: str) -> Optional[str]:
         normalized_role = role.strip().lower()
         if normalized_role not in VALID_ROLES:
@@ -1292,7 +1304,7 @@ class HttpServer:
     def build_app(self) -> web.Application:
         app = web.Application(
             client_max_size=self._config.gateway.request_max_bytes,
-            middlewares=[self._error_middleware],
+            middlewares=[self._tracing_middleware, self._error_middleware],
         )
         app.add_routes(
             [

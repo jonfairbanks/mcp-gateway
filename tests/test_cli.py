@@ -96,6 +96,20 @@ def test_validate_database_runtime_skips_single_shared_mode() -> None:
     assert logger.errors == []
 
 
+def test_load_environment_calls_python_dotenv(monkeypatch) -> None:
+    called = False
+
+    def fake_load_dotenv() -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(cli, "load_dotenv", fake_load_dotenv)
+
+    cli._load_environment()
+
+    assert called is True
+
+
 def test_run_create_api_key_reports_auth_mode_misconfiguration(monkeypatch, capsys) -> None:
     config = SimpleNamespace(gateway=SimpleNamespace(auth_mode="single_shared"))
     monkeypatch.setattr(cli, "load_config", lambda _path: config)
