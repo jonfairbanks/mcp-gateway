@@ -48,8 +48,6 @@ def _config() -> AppConfig:
             rate_limit_per_minute=120,
             circuit_breaker_fail_threshold=10,
             circuit_breaker_open_seconds=30,
-            sse_queue_max_messages=100,
-            max_sse_sessions=1000,
         ),
         logging=LoggingConfig(stdout_json=False, extra_redact_fields=[]),
         cache=CacheConfig(enabled=True, max_entries=100, default_ttl_minutes=60, client_scoped_tools=[]),
@@ -57,7 +55,7 @@ def _config() -> AppConfig:
             UpstreamConfig(
                 id="jira",
                 name="jira",
-                transport="http_sse",
+                transport="streamable_http",
                 endpoint="https://example.com/jira",
                 http_headers={},
                 bearer_token_env_var=None,
@@ -77,7 +75,7 @@ def _config() -> AppConfig:
             UpstreamConfig(
                 id="github",
                 name="github",
-                transport="http_sse",
+                transport="streamable_http",
                 endpoint="https://example.com/github",
                 http_headers={},
                 bearer_token_env_var=None,
@@ -97,7 +95,7 @@ def _config() -> AppConfig:
             UpstreamConfig(
                 id="aws",
                 name="aws",
-                transport="http_sse",
+                transport="streamable_http",
                 endpoint="https://example.com/aws",
                 http_headers={},
                 bearer_token_env_var=None,
@@ -117,7 +115,7 @@ def _config() -> AppConfig:
             UpstreamConfig(
                 id="context7",
                 name="context7",
-                transport="http_sse",
+                transport="streamable_http",
                 endpoint="https://example.com/context7",
                 http_headers={},
                 bearer_token_env_var=None,
@@ -137,7 +135,7 @@ def _config() -> AppConfig:
             UpstreamConfig(
                 id="notion",
                 name="notion",
-                transport="http_sse",
+                transport="streamable_http",
                 endpoint="https://example.com/notion",
                 http_headers={},
                 bearer_token_env_var=None,

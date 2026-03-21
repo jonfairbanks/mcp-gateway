@@ -17,7 +17,7 @@ from .postgres import PostgresStore
 from .request_context import AuthenticatedPrincipal, RequestContext
 from .router import build_routes, select_upstream
 from .telemetry import GatewayTelemetry
-from .upstreams import HTTPUpstream, StdioUpstream, UpstreamResponse
+from .upstreams import StdioUpstream, StreamableHTTPUpstream, UpstreamResponse
 
 BUILTIN_REDACT_FIELDS = frozenset(
     {
@@ -84,7 +84,7 @@ class Gateway:
         self._authorization = AuthorizationService(config, store)
         self._routes = build_routes(config.upstreams)
         self._memory_cache = TTLCache(config.cache.max_entries)
-        self._http_upstreams: Dict[str, HTTPUpstream] = {}
+        self._http_upstreams: Dict[str, StreamableHTTPUpstream] = {}
         self._stdio_upstreams: Dict[str, StdioUpstream] = {}
         self._upstream_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._tool_registry: Dict[str, str] = {}
@@ -109,8 +109,24 @@ class Gateway:
         for client in self._stdio_upstreams.values():
             await client.close()
 
+    def store_available(self) -> bool:
+        return self._store.is_available()
+
     async def authenticate_token(self, token: Optional[str]) -> Optional[AuthenticatedPrincipal]:
         return await self._auth.authenticate_token(token)
+
+    async def consume_rate_limit(
+        self,
+        *,
+        scope_key: str,
+        limit: int,
+        window_seconds: int = 60,
+    ) -> dict[str, int | bool]:
+        return await self._store.consume_rate_limit(
+            scope_key=scope_key,
+            limit=limit,
+            window_seconds=window_seconds,
+        )
 
     def auth_required(self) -> bool:
         return self._auth.auth_required()
@@ -725,7 +741,10 @@ class Gateway:
         }
 
     def is_ready(self) -> bool:
-        return any(status.get("initialize_success") for status in self._warmup_status.values())
+        return any(
+            status.get("initialize_success") and status.get("tools_list_success")
+            for status in self._warmup_status.values()
+        )
 
     async def tools_catalog(self) -> Dict[str, Any]:
         async with self._registry_lock:
@@ -1068,12 +1087,12 @@ class Gateway:
         return {"jsonrpc": "2.0", "id": payload.get("id"), "result": merged}, success, upstream_errors
 
     async def _get_upstream_client(self, upstream: UpstreamConfig):
-        if upstream.transport == "http_sse":
+        if upstream.transport == "streamable_http":
             client = self._http_upstreams.get(upstream.id)
             if not client:
                 if not upstream.endpoint:
                     raise RuntimeError(f"Upstream '{upstream.id}' missing endpoint")
-                client = HTTPUpstream(
+                client = StreamableHTTPUpstream(
                     upstream.endpoint,
                     upstream.timeout_ms,
                     headers=upstream.http_headers,

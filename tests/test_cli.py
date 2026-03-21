@@ -131,6 +131,9 @@ def test_cache_cleanup_loop_runs_and_stops_cleanly(monkeypatch) -> None:
             self.called.set()
             return 2
 
+        async def cleanup_expired_rate_limits(self) -> int:
+            return 1
+
     store = FakeStore()
 
     async def run_test() -> None:
@@ -143,3 +146,5 @@ def test_cache_cleanup_loop_runs_and_stops_cleanly(monkeypatch) -> None:
 
     assert logger.infos
     assert logger.infos[0][0] == "cache_cleanup"
+    assert logger.infos[0][1]["deleted_rows"] == 2
+    assert logger.infos[0][1]["rate_limit_deleted_rows"] == 1

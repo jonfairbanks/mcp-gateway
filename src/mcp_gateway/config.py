@@ -18,6 +18,7 @@ VALID_AUTH_MODES = frozenset(
         AUTH_MODE_POSTGRES_API_KEYS,
     }
 )
+VALID_UPSTREAM_TRANSPORTS = frozenset({"stdio", "streamable_http"})
 
 
 @dataclass
@@ -34,8 +35,6 @@ class GatewayConfig:
     rate_limit_per_minute: int
     circuit_breaker_fail_threshold: int
     circuit_breaker_open_seconds: int
-    sse_queue_max_messages: int
-    max_sse_sessions: int
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
@@ -55,8 +54,6 @@ class GatewayConfig:
             rate_limit_per_minute=int(_get(data, "rate_limit_per_minute", 120)),
             circuit_breaker_fail_threshold=int(_get(data, "circuit_breaker_fail_threshold", 20)),
             circuit_breaker_open_seconds=int(_get(data, "circuit_breaker_open_seconds", 30)),
-            sse_queue_max_messages=int(_get(data, "sse_queue_max_messages", 100)),
-            max_sse_sessions=int(_get(data, "max_sse_sessions", 1000)),
         )
 
 
@@ -116,10 +113,15 @@ class UpstreamConfig:
         upstream_id = data["id"]
         bearer_token_env_var = data.get("bearer_token_env_var")
         _validate_env_var_name(bearer_token_env_var, f"upstreams[{upstream_id}].bearer_token_env_var")
+        transport = str(data["transport"])
+        if transport == "http_sse":
+            raise ValueError("upstreams[].transport 'http_sse' has been removed; use 'streamable_http'")
+        if transport not in VALID_UPSTREAM_TRANSPORTS:
+            raise ValueError("upstreams[].transport must be one of: stdio, streamable_http")
         return cls(
             id=upstream_id,
             name=data.get("name", upstream_id),
-            transport=data["transport"],
+            transport=transport,
             endpoint=data.get("endpoint"),
             http_headers={str(key): str(value) for key, value in (data.get("http_headers", {}) or {}).items()},
             bearer_token_env_var=bearer_token_env_var,

@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+from pathlib import Path
 
 from mcp_gateway import upstreams
+
+FIXTURE_STDIO_UPSTREAM = Path(__file__).resolve().parent / "fixtures" / "fake_stdio_upstream.py"
 
 
 def test_http_upstream_start_is_safe_under_concurrent_first_use(monkeypatch) -> None:
@@ -18,7 +22,7 @@ def test_http_upstream_start_is_safe_under_concurrent_first_use(monkeypatch) -> 
 
     monkeypatch.setattr(upstreams.aiohttp, "ClientSession", FakeClientSession)
 
-    client = upstreams.HTTPUpstream("https://example.com/mcp", 1000)
+    client = upstreams.StreamableHTTPUpstream("https://example.com/mcp", 1000)
 
     async def run_test() -> None:
         await asyncio.gather(client.start(), client.start(), client.start())
@@ -62,7 +66,7 @@ class FakeClientSession:
 
 
 def test_http_upstream_call_parses_plain_json_response() -> None:
-    client = upstreams.HTTPUpstream("https://example.com/mcp", 1000)
+    client = upstreams.StreamableHTTPUpstream("https://example.com/mcp", 1000)
     client._session = FakeClientSession(
         [
             FakeResponse(
@@ -79,7 +83,7 @@ def test_http_upstream_call_parses_plain_json_response() -> None:
 
 
 def test_http_upstream_call_parses_sse_response_and_ignores_notifications() -> None:
-    client = upstreams.HTTPUpstream("https://example.com/mcp", 1000)
+    client = upstreams.StreamableHTTPUpstream("https://example.com/mcp", 1000)
     client._session = FakeClientSession(
         [
             FakeResponse(
@@ -117,7 +121,7 @@ def test_http_upstream_call_parses_sse_response_and_ignores_notifications() -> N
 
 
 def test_http_upstream_call_errors_when_sse_body_has_no_matching_response() -> None:
-    client = upstreams.HTTPUpstream("https://example.com/mcp", 1000)
+    client = upstreams.StreamableHTTPUpstream("https://example.com/mcp", 1000)
     client._session = FakeClientSession(
         [
             FakeResponse(
@@ -137,3 +141,51 @@ def test_http_upstream_call_errors_when_sse_body_has_no_matching_response() -> N
 
     assert response.success is False
     assert response.payload["error"]["message"] == "HTTP upstream returned SSE body without matching JSON-RPC response (status 200)"
+
+
+def test_stdio_upstream_restarts_after_child_exit() -> None:
+    client = upstreams.StdioUpstream(
+        [sys.executable, str(FIXTURE_STDIO_UPSTREAM)],
+        {
+            "FAKE_STDIO_TOOL_NAME": "stdio.echo",
+            "FAKE_STDIO_EXIT_AFTER_RESPONSES": "1",
+        },
+        None,
+        1000,
+        1024 * 1024,
+        "stdio-fixture",
+    )
+
+    async def run_test() -> tuple[upstreams.UpstreamResponse, upstreams.UpstreamResponse, int, int]:
+        first = await client.call(
+            {
+                "jsonrpc": "2.0",
+                "id": "req-1",
+                "method": "tools/call",
+                "params": {"name": "stdio.echo", "arguments": {"value": "first"}},
+            }
+        )
+        assert client._process is not None
+        first_pid = client._process.pid
+        await asyncio.wait_for(client._process.wait(), timeout=2.0)
+
+        second = await client.call(
+            {
+                "jsonrpc": "2.0",
+                "id": "req-2",
+                "method": "tools/call",
+                "params": {"name": "stdio.echo", "arguments": {"value": "second"}},
+            }
+        )
+        assert client._process is not None
+        second_pid = client._process.pid
+        await client.close()
+        return first, second, first_pid, second_pid
+
+    first, second, first_pid, second_pid = asyncio.run(run_test())
+
+    assert first.success is True
+    assert first.payload["result"]["content"][0]["text"] == "stdio.echo:first"
+    assert second.success is True
+    assert second.payload["result"]["content"][0]["text"] == "stdio.echo:second"
+    assert second_pid != first_pid

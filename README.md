@@ -138,8 +138,6 @@ http_headers = { "Authorization" = "Bearer change-me" }
 - `GET /metrics` Prometheus/OpenMetrics scrape endpoint for gateway and upstream counters.
 - `GET /healthz` liveness endpoint with gateway status and warmup/circuit-breaker snapshot.
 - `GET /readyz` readiness endpoint; returns `503` until at least one upstream is initialized and usable.
-- `GET /sse` opens a streamable MCP server-sent events session for clients using the SSE/message transport.
-- `POST /message` sends JSON-RPC messages to an active `/sse` session or executes them directly when no session is supplied.
 - `GET /v1/me` returns the authenticated principal, role, auth scheme, and linked user metadata.
 - `GET /v1/me/api-keys` lists the caller’s API keys and metadata without returning plaintext secrets.
 - `POST /v1/me/api-keys` creates a new API key for the authenticated user and returns the plaintext key once.
@@ -175,6 +173,23 @@ Default local endpoints:
 
 - Gateway: `http://localhost:8080`
 - Postgres: `postgresql://postgres:postgres@localhost:5432/mcp_gateway`
+
+## Testing
+
+Use the editable dev install so pytest has both runtime dependencies such as `psycopg` and the test tools:
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+The Postgres integration test boots the aiohttp app, one HTTP fixture upstream, and one stdio fixture upstream against a real database. Start Postgres first, then point the test suite at it with a dedicated DSN:
+
+```bash
+docker compose up -d postgres
+export MCP_GATEWAY_TEST_DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway'
+pytest tests/test_integration_app.py
+```
 
 ## Docs
 

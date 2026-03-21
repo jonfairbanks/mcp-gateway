@@ -52,6 +52,17 @@ CREATE TABLE IF NOT EXISTS mcp_cache (
 
 CREATE INDEX IF NOT EXISTS idx_mcp_cache_expires_at ON mcp_cache (expires_at);
 
+CREATE TABLE IF NOT EXISTS gateway_rate_limits (
+  scope_key TEXT NOT NULL,
+  window_started_at TIMESTAMPTZ NOT NULL,
+  request_count INTEGER NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (scope_key, window_started_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gateway_rate_limits_expires_at ON gateway_rate_limits (expires_at);
+
 CREATE TABLE IF NOT EXISTS gateway_users (
   id UUID PRIMARY KEY,
   subject TEXT NOT NULL UNIQUE,

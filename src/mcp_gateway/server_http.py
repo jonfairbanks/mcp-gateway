@@ -6,7 +6,6 @@ import json
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
-from uuid import uuid4
 
 from aiohttp import web
 
@@ -23,18 +22,12 @@ from .authorization import (
     PLATFORM_PERMISSION_USAGE_READ,
 )
 from .config import AppConfig
+from .errors import GatewayHTTPError
 from .gateway import Gateway
-from .jsonrpc import json_dumps, make_error_response
+from .jsonrpc import make_error_response
 from .logging import Logger
 from .request_context import AuthenticatedPrincipal, RequestContext
 from .telemetry import GatewayTelemetry
-
-
-class SseSession:
-    def __init__(self, response: web.StreamResponse, max_messages: int) -> None:
-        self.response = response
-        self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=max_messages)
-        self.closed = False
 
 
 class HttpServer:
@@ -43,7 +36,6 @@ class HttpServer:
         self._gateway = gateway
         self._logger = logger
         self._telemetry = telemetry
-        self._sessions: Dict[str, SseSession] = {}
         self._rate_limit_state: Dict[str, tuple[float, int]] = {}
         self._rate_limit_lock = asyncio.Lock()
         self._rate_limit_gc_interval_seconds = 60.0
@@ -99,6 +91,38 @@ class HttpServer:
             error=str(exc) or type(exc).__name__,
             **fields,
         )
+
+    def _log_http_error_exception(self, endpoint: str, exc: GatewayHTTPError) -> None:
+        log_method = self._logger.warn if exc.status < 500 else self._logger.error
+        log_method(
+            "http_service_error",
+            endpoint=endpoint,
+            status=exc.status,
+            error=exc.error,
+            message=exc.message,
+            **exc.fields,
+        )
+
+    def _gateway_http_error_response(self, endpoint: str, exc: GatewayHTTPError) -> web.Response:
+        self._log_http_error_exception(endpoint, exc)
+        return self._rest_error(exc.status, exc.error, exc.message, **exc.fields)
+
+    @web.middleware
+    async def _error_middleware(self, request: web.Request, handler):
+        try:
+            return await handler(request)
+        except GatewayHTTPError as exc:
+            return self._gateway_http_error_response(request.path, exc)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.error(
+                "http_unhandled_exception",
+                endpoint=request.path,
+                error_type=type(exc).__name__,
+                error=str(exc) or type(exc).__name__,
+            )
+            if request.path == "/mcp":
+                return web.json_response(make_error_response(None, -32603, "Internal error"), status=500)
+            return self._rest_error(500, "InternalError", "Unexpected server error.")
 
     def _normalize_role(self, role: str) -> Optional[str]:
         normalized_role = role.strip().lower()
@@ -284,17 +308,27 @@ class HttpServer:
                 self._rate_limit_state.pop(client_id, None)
         self._next_rate_limit_gc_at = now + self._rate_limit_gc_interval_seconds
 
-    async def _rate_limit(self, client_id: str) -> Optional[web.Response]:
+    def _rate_limit_scope_key(self, request_context: RequestContext) -> str:
+        principal = request_context.principal
+        if principal is not None:
+            if principal.api_key_id:
+                return f"api_key:{principal.api_key_id}"
+            if principal.user_id:
+                return f"user:{principal.user_id}"
+            return f"subject:{principal.auth_scheme}:{principal.subject}"
+        return f"client:{request_context.client_id or 'anonymous'}"
+
+    async def _fallback_rate_limit(self, scope_key: str) -> Optional[web.Response]:
         limit = max(1, self._config.gateway.rate_limit_per_minute)
         now = time.monotonic()
         async with self._rate_limit_lock:
             self._prune_rate_limit_state(now)
-            window_start, count = self._rate_limit_state.get(client_id, (now, 0))
+            window_start, count = self._rate_limit_state.get(scope_key, (now, 0))
             if now - window_start >= 60:
                 window_start = now
                 count = 0
             count += 1
-            self._rate_limit_state[client_id] = (window_start, count)
+            self._rate_limit_state[scope_key] = (window_start, count)
             if count <= limit:
                 return None
         retry_after = max(1, int(60 - (now - window_start)))
@@ -304,31 +338,23 @@ class HttpServer:
             headers={"Retry-After": str(retry_after)},
         )
 
-    def _session_capacity_exceeded(self) -> bool:
-        return len(self._sessions) >= max(1, self._config.gateway.max_sse_sessions)
-
-    async def _close_session(self, session_id: str) -> None:
-        session = self._sessions.pop(session_id, None)
-        if not session:
-            return
-        session.closed = True
-        try:
-            await session.response.write_eof()
-        except RuntimeError:
-            pass
-        except ConnectionResetError:
-            pass
-
-    async def _enqueue_session_payload(self, session_id: str, data: str) -> bool:
-        session = self._sessions.get(session_id)
-        if not session or session.closed:
-            return False
-        try:
-            session.queue.put_nowait(data)
-            return True
-        except asyncio.QueueFull:
-            await self._close_session(session_id)
-            return False
+    async def _rate_limit(self, request_context: RequestContext) -> Optional[web.Response]:
+        scope_key = self._rate_limit_scope_key(request_context)
+        limit = max(1, self._config.gateway.rate_limit_per_minute)
+        if self._gateway.store_available():
+            try:
+                result = await self._gateway.consume_rate_limit(scope_key=scope_key, limit=limit, window_seconds=60)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.warn("rate_limit_store_unavailable", scope_key=scope_key, error=str(exc))
+            else:
+                if bool(result["allowed"]):
+                    return None
+                return web.json_response(
+                    make_error_response(None, -32029, "Rate limit exceeded"),
+                    status=429,
+                    headers={"Retry-After": str(int(result["retry_after_seconds"]))},
+                )
+        return await self._fallback_rate_limit(scope_key)
 
     async def _preflight_request(
         self,
@@ -351,31 +377,58 @@ class HttpServer:
             if unauthorized:
                 return None, unauthorized
         client_id = self._client_id(request)
-        blocked = await self._rate_limit(client_id)
+        request_context = RequestContext(client_id=client_id, principal=principal)
+        blocked = await self._rate_limit(request_context)
         if blocked:
             return None, blocked
-        return RequestContext(client_id=client_id, principal=principal), None
+        return request_context, None
 
-    async def _parse_json_request(self, request: web.Request) -> tuple[Optional[Dict[str, Any]], Optional[web.Response]]:
+    async def _parse_json_request(self, request: web.Request) -> tuple[Optional[Any], Optional[web.Response]]:
         try:
             return await request.json(), None
         except json.JSONDecodeError:
             return None, web.json_response(make_error_response(None, -32700, "Invalid JSON"), status=400)
 
-    async def _dispatch_gateway_request(
+    @staticmethod
+    def _jsonrpc_http_response(payload: Any, status: int = 200) -> web.Response:
+        return web.json_response(payload, status=status)
+
+    @staticmethod
+    def _is_jsonrpc_response_message(payload: dict[str, Any]) -> bool:
+        if payload.get("jsonrpc") != "2.0":
+            return False
+        return "method" not in payload and ("result" in payload or "error" in payload)
+
+    async def _handle_single_message(
         self,
-        request: web.Request,
-        endpoint: Optional[str] = None,
-    ) -> tuple[Optional[Dict[str, Any]], Optional[web.Response], Optional[Any]]:
-        request_context, blocked = await self._preflight_request(request, endpoint=endpoint)
-        if blocked:
-            return None, blocked, None
-        assert request_context is not None
-        payload, invalid_json = await self._parse_json_request(request)
-        if invalid_json:
-            return None, invalid_json, None
+        payload: Any,
+        request_context: RequestContext,
+    ) -> tuple[Optional[dict[str, Any]], Optional[web.Response]]:
+        if not isinstance(payload, dict):
+            return None, self._jsonrpc_http_response(make_error_response(None, -32600, "Invalid Request"), status=400)
+        if self._is_jsonrpc_response_message(payload):
+            return None, None
         result = await self._gateway.handle(payload, request_context)
-        return payload, None, result
+        if payload.get("id") is None:
+            return None, None
+        return result.payload, None
+
+    async def _handle_batch_message(self, payloads: list[Any], request_context: RequestContext) -> web.Response:
+        if not payloads:
+            return self._jsonrpc_http_response(make_error_response(None, -32600, "Invalid Request"), status=400)
+        responses: list[dict[str, Any]] = []
+        for item in payloads:
+            payload, invalid = await self._handle_single_message(item, request_context)
+            if invalid is not None:
+                body = invalid.body
+                assert body is not None
+                responses.append(json.loads(body.decode("utf-8")))
+                continue
+            if payload is not None:
+                responses.append(payload)
+        if not responses:
+            return web.Response(status=202)
+        return self._jsonrpc_http_response(responses)
 
     async def health_handler(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "service": "mcp-gateway", **self._gateway.status_snapshot()})
@@ -1169,53 +1222,13 @@ class HttpServer:
             }
         )
 
-    async def sse_handler(self, request: web.Request) -> web.StreamResponse:
-        request_context, blocked = await self._preflight_request(request)
-        if blocked:
-            return blocked
-        assert request_context is not None
-        if self._session_capacity_exceeded():
-            return web.json_response(
-                make_error_response(
-                    None,
-                    -32031,
-                    "SSE session capacity exceeded",
-                    data={"category": "capacity_exhausted", "retryable": True},
-                ),
-                status=503,
-            )
+    async def mcp_get_handler(self, request: web.Request) -> web.Response:
+        return web.Response(status=405, headers={"Allow": "POST"}, text="This endpoint does not offer GET SSE streams.")
 
-        response = web.StreamResponse(
-            status=200,
-            reason="OK",
-            headers={
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-            },
-        )
-        await response.prepare(request)
-        session_id = str(uuid4())
-        session = SseSession(response, max(1, self._config.gateway.sse_queue_max_messages))
-        self._sessions[session_id] = session
+    async def mcp_delete_handler(self, request: web.Request) -> web.Response:
+        return web.Response(status=405, headers={"Allow": "POST"}, text="This endpoint does not support session deletion.")
 
-        await response.write(f"event: ready\ndata: {session_id}\n\n".encode("utf-8"))
-        await response.drain()
-
-        try:
-            while not session.closed:
-                data = await session.queue.get()
-                await response.write(f"data: {data}\n\n".encode("utf-8"))
-                await response.drain()
-        except asyncio.CancelledError:
-            pass
-        finally:
-            await self._close_session(session_id)
-
-        return response
-
-    async def message_handler(self, request: web.Request) -> web.Response:
-        session_id = request.query.get("session_id") or request.headers.get("MCP-Session-ID")
+    async def mcp_post_handler(self, request: web.Request) -> web.Response:
         request_context, blocked = await self._preflight_request(request)
         if blocked:
             return blocked
@@ -1223,39 +1236,20 @@ class HttpServer:
         payload, invalid_json = await self._parse_json_request(request)
         if invalid_json:
             return invalid_json
-        assert payload is not None
-        result = await self._gateway.handle(payload, request_context)
-        assert result is not None
-        if payload.get("id") is None:
+        if isinstance(payload, list):
+            return await self._handle_batch_message(payload, request_context)
+        single_payload, invalid = await self._handle_single_message(payload, request_context)
+        if invalid is not None:
+            return invalid
+        if single_payload is None:
             return web.Response(status=202)
-        if session_id and session_id in self._sessions:
-            enqueued = await self._enqueue_session_payload(session_id, json_dumps(result.payload))
-            if not enqueued:
-                return web.json_response(
-                    make_error_response(
-                        payload.get("id"),
-                        -32030,
-                        "SSE session backpressure",
-                        data={"category": "session_backpressure", "retryable": True, "session_id": session_id},
-                    ),
-                    status=503,
-                )
-            return web.json_response({"status": "queued", "session_id": session_id})
-
-        return web.json_response(result.payload)
-
-    async def rpc_handler(self, request: web.Request) -> web.Response:
-        payload, blocked, result = await self._dispatch_gateway_request(request)
-        if blocked:
-            return blocked
-        assert payload is not None
-        assert result is not None
-        if payload.get("id") is None:
-            return web.Response(status=202)
-        return web.json_response(result.payload)
+        return self._jsonrpc_http_response(single_payload)
 
     def build_app(self) -> web.Application:
-        app = web.Application(client_max_size=self._config.gateway.request_max_bytes)
+        app = web.Application(
+            client_max_size=self._config.gateway.request_max_bytes,
+            middlewares=[self._error_middleware],
+        )
         app.add_routes(
             [
                 web.get("/healthz", self.health_handler),
@@ -1292,9 +1286,9 @@ class HttpServer:
                     self.admin_group_platform_grants_delete_handler,
                 ),
                 web.get("/v1/admin/usage", self.admin_usage_handler),
-                web.get("/sse", self.sse_handler),
-                web.post("/message", self.message_handler),
-                web.post("/mcp", self.rpc_handler),
+                web.get("/mcp", self.mcp_get_handler),
+                web.post("/mcp", self.mcp_post_handler),
+                web.delete("/mcp", self.mcp_delete_handler),
             ]
         )
         return app

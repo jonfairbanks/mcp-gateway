@@ -19,6 +19,18 @@ class FakeStderr:
         return None
 
 
+class FakeStdout:
+    def __init__(self) -> None:
+        self.chunks: list[str] = []
+
+    def write(self, chunk: str) -> int:
+        self.chunks.append(chunk)
+        return len(chunk)
+
+    def flush(self) -> None:
+        return None
+
+
 def test_format_startup_summary_is_human_readable() -> None:
     summary = {
         "gateway_ready": True,
@@ -59,3 +71,16 @@ def test_pretty_startup_summary_only_writes_for_tty(monkeypatch) -> None:
     monkeypatch.setattr("sys.stderr", non_tty_stderr)
     logger.pretty_startup_summary(summary)
     assert non_tty_stderr.chunks == []
+
+
+def test_logger_emits_human_readable_text_when_json_logging_is_disabled(monkeypatch) -> None:
+    logger = Logger(stdout_json=False)
+    fake_stdout = FakeStdout()
+    monkeypatch.setattr("sys.stdout", fake_stdout)
+
+    logger.info("upstream_warmup", upstream_id="context7", tool_count=2)
+
+    rendered = "".join(fake_stdout.chunks)
+    assert rendered.startswith("INFO upstream_warmup")
+    assert 'upstream_id="context7"' in rendered
+    assert "tool_count=2" in rendered

@@ -23,7 +23,7 @@ class SseEvent:
     data: str
 
 
-class HTTPUpstream:
+class StreamableHTTPUpstream:
     def __init__(
         self,
         endpoint: str,
@@ -235,25 +235,39 @@ class StdioUpstream:
         self._on_stderr_line = on_stderr_line
         self._process: Optional[asyncio.subprocess.Process] = None
         self._lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
         self._stderr_task: Optional[asyncio.Task[None]] = None
 
     async def start(self) -> None:
-        if self._process:
-            return
-        merged_env = None
-        if self._env:
-            # Merge custom env vars over process env so PATH and runtime defaults are preserved.
-            merged_env = {**os.environ, **self._env}
-        self._process = await asyncio.create_subprocess_exec(
-            *self._command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=merged_env,
-            cwd=self._cwd,
-            limit=self._read_limit_bytes,
-        )
-        self._stderr_task = asyncio.create_task(self._stream_stderr())
+        async with self._start_lock:
+            if self._process and self._process.returncode is None:
+                return
+            if self._process and self._process.returncode is not None:
+                await self._discard_dead_process()
+            merged_env = None
+            if self._env:
+                # Merge custom env vars over process env so PATH and runtime defaults are preserved.
+                merged_env = {**os.environ, **self._env}
+            self._process = await asyncio.create_subprocess_exec(
+                *self._command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=merged_env,
+                cwd=self._cwd,
+                limit=self._read_limit_bytes,
+            )
+            self._stderr_task = asyncio.create_task(self._stream_stderr())
+
+    async def _discard_dead_process(self) -> None:
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
+            except asyncio.CancelledError:
+                pass
+            self._stderr_task = None
+        self._process = None
 
     async def close(self) -> None:
         if not self._process:
@@ -286,8 +300,12 @@ class StdioUpstream:
         assert self._process.stdin
         assert self._process.stdout
         async with self._lock:
-            self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
-            await self._process.stdin.drain()
+            try:
+                self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
+                await self._process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                await self._discard_dead_process()
+                raise RuntimeError("Upstream stdio closed") from None
             expected_id = payload.get("id")
             deadline = time.monotonic() + self._timeout
             while True:
@@ -296,6 +314,7 @@ class StdioUpstream:
                     raise asyncio.TimeoutError()
                 line = await asyncio.wait_for(self._process.stdout.readline(), timeout=remaining)
                 if not line:
+                    await self._discard_dead_process()
                     raise RuntimeError("Upstream stdio closed")
                 data = json.loads(line.decode("utf-8"))
                 # Stdio upstreams may emit notifications/progress messages between requests.
@@ -310,8 +329,12 @@ class StdioUpstream:
         assert self._process
         assert self._process.stdin
         async with self._lock:
-            self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
-            await self._process.stdin.drain()
+            try:
+                self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
+                await self._process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                await self._discard_dead_process()
+                raise RuntimeError("Upstream stdio closed") from None
 
     async def _stream_stderr(self) -> None:
         if not self._process or not self._process.stderr:
