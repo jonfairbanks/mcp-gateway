@@ -66,7 +66,7 @@ class LoggingConfig:
     def from_dict(cls, data: Dict[str, Any]) -> "LoggingConfig":
         return cls(
             stdout_json=bool(_get(data, "stdout_json", True)),
-            extra_redact_fields=[str(field) for field in list(_get(data, "extra_redact_fields", []))],
+            extra_redact_fields=[str(field) for field in _string_list(_get(data, "extra_redact_fields", []), "logging.extra_redact_fields")],
         )
 
 
@@ -83,7 +83,7 @@ class CacheConfig:
             enabled=bool(_get(data, "enabled", True)),
             max_entries=int(_get(data, "max_entries", 1000)),
             default_ttl_minutes=int(_get(data, "default_ttl_minutes", 60)),
-            client_scoped_tools=[str(tool) for tool in list(_get(data, "client_scoped_tools", []))],
+            client_scoped_tools=[str(tool) for tool in _string_list(_get(data, "client_scoped_tools", []), "cache.client_scoped_tools")],
         )
 
 
@@ -123,20 +123,20 @@ class UpstreamConfig:
             name=data.get("name", upstream_id),
             transport=transport,
             endpoint=data.get("endpoint"),
-            http_headers={str(key): str(value) for key, value in (data.get("http_headers", {}) or {}).items()},
+            http_headers=_string_map(data.get("http_headers", {}), f"upstreams[{upstream_id}].http_headers"),
             bearer_token_env_var=bearer_token_env_var,
             http_serialize_requests=bool(data.get("http_serialize_requests", False)),
             command=_normalize_stdio_command(data),
-            env={str(key): str(value) for key, value in (data.get("env", {}) or {}).items()},
+            env=_string_map(data.get("env", {}), f"upstreams[{upstream_id}].env"),
             cwd=data.get("cwd"),
             timeout_ms=int(data.get("timeout_ms", 10000)),
             stdio_read_limit_bytes=int(data.get("stdio_read_limit_bytes", 100 * 1024 * 1024)),
             max_in_flight=int(data.get("max_in_flight", 20)),
-            deny_tools=[str(tool) for tool in (data.get("deny_tools", []) or [])],
+            deny_tools=[str(tool) for tool in _string_list(data.get("deny_tools", []), f"upstreams[{upstream_id}].deny_tools")],
             cache_ttl_minutes=_optional_int(data.get("cache_ttl_minutes")),
             circuit_breaker_fail_threshold=_optional_int(data.get("circuit_breaker_fail_threshold")),
             circuit_breaker_open_seconds=_optional_int(data.get("circuit_breaker_open_seconds")),
-            tool_routes=[str(route) for route in (data.get("tool_routes", []) or [])],
+            tool_routes=[str(route) for route in _string_list(data.get("tool_routes", []), f"upstreams[{upstream_id}].tool_routes")],
         )
 
 
@@ -168,6 +168,22 @@ def _optional_int(value: Any) -> Optional[int]:
     if value is None:
         return None
     return int(value)
+
+
+def _string_map(value: Any, path: str) -> Dict[str, str]:
+    if value in (None, {}):
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must be a mapping of string keys to string values")
+    return {str(key): str(item) for key, item in value.items()}
+
+
+def _string_list(value: Any, path: str) -> List[Any]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{path} must be a list")
+    return value
 
 
 def _validate_env_var_name(value: Any, path: str) -> None:

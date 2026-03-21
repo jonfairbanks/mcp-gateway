@@ -400,3 +400,124 @@ def test_rate_limits_apply_across_two_gateway_instances_with_shared_postgres() -
                 await store_b.close()
 
     asyncio.run(run_test())
+
+
+def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> None:
+    async def run_test() -> None:
+        http_app = web.Application()
+        tool_call_count = 0
+
+        async def upstream_handler(request: web.Request) -> web.StreamResponse:
+            nonlocal tool_call_count
+            payload = await request.json()
+            method = payload.get("method")
+            if method == "notifications/initialized":
+                return web.Response(status=202)
+            if method == "initialize":
+                return web.json_response(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": payload.get("id"),
+                        "result": {
+                            "protocolVersion": payload.get("params", {}).get("protocolVersion", CURRENT_PROTOCOL_VERSION),
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "fake-http-upstream", "version": "0.1.0"},
+                        },
+                    }
+                )
+            if method == "tools/list":
+                return web.json_response(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": payload.get("id"),
+                        "result": {
+                            "tools": [
+                                {
+                                    "name": "http.echo",
+                                    "description": "Echoes the provided value.",
+                                    "inputSchema": {"type": "object"},
+                                }
+                            ]
+                        },
+                    }
+                )
+            if method == "tools/call":
+                tool_call_count += 1
+                args = (payload.get("params") or {}).get("arguments") or {}
+                return web.json_response(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": payload.get("id"),
+                        "result": {
+                            "content": [{"type": "text", "text": f"http.echo:{args.get('value', '')}"}],
+                            "isError": False,
+                        },
+                    }
+                )
+            return web.json_response({"jsonrpc": "2.0", "id": payload.get("id"), "result": {}})
+
+        http_app.router.add_post("/mcp", upstream_handler)
+
+        async with TestServer(http_app) as upstream_server:
+            dsn = os.environ[TEST_DATABASE_DSN_ENV]
+            store_a = PostgresStore(dsn)
+            store_b = PostgresStore(dsn)
+            await store_a.start()
+            await store_b.start()
+            await _prepare_database(store_a)
+
+            config = _gateway_config(str(upstream_server.make_url("/mcp")))
+            config.gateway.auth_mode = "postgres_api_keys"
+            config.gateway.api_key = ""
+
+            logger = Logger(stdout_json=False)
+            telemetry_a = GatewayTelemetry()
+            telemetry_b = GatewayTelemetry()
+            gateway_a = Gateway(config, store_a, logger, telemetry_a)
+            gateway_b = Gateway(config, store_b, logger, telemetry_b)
+            server_a = HttpServer(config, gateway_a, logger, telemetry_a)
+            server_b = HttpServer(config, gateway_b, logger, telemetry_b)
+
+            try:
+                user = await gateway_a.create_user(subject="alice", display_name="Alice", role="admin")
+                assert user is not None
+                issued = await gateway_a.issue_api_key_for_user(user_id=user["id"], key_name="laptop")
+                headers = {"Authorization": f"Bearer {issued['api_key']}"}
+
+                await gateway_a.warmup()
+                await gateway_b.warmup()
+
+                async with TestServer(server_a.build_app()) as gateway_server_a:
+                    async with TestServer(server_b.build_app()) as gateway_server_b:
+                        async with TestClient(gateway_server_a) as client_a:
+                            async with TestClient(gateway_server_b) as client_b:
+                                me_a = await client_a.get("/v1/me", headers=headers)
+                                me_b = await client_b.get("/v1/me", headers=headers)
+                                assert me_a.status == 200
+                                assert me_b.status == 200
+                                assert (await me_a.json())["subject"] == "alice"
+                                assert (await me_b.json())["subject"] == "alice"
+
+                                payload = {
+                                    "jsonrpc": "2.0",
+                                    "id": "call-1",
+                                    "method": "tools/call",
+                                    "params": {"name": "http.echo", "arguments": {"value": "shared-cache"}},
+                                }
+                                first = await client_a.post("/mcp", headers=headers, json=payload)
+                                second = await client_b.post("/mcp", headers=headers, json=payload)
+
+                                assert first.status == 200
+                                assert second.status == 200
+                                assert (await first.json())["result"]["content"][0]["text"] == "http.echo:shared-cache"
+                                assert (await second.json())["result"]["content"][0]["text"] == "http.echo:shared-cache"
+                                assert tool_call_count == 1
+            finally:
+                await gateway_a.close()
+                await gateway_b.close()
+                await telemetry_a.close()
+                await telemetry_b.close()
+                await store_a.close()
+                await store_b.close()
+
+    asyncio.run(run_test())

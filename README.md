@@ -62,6 +62,7 @@ Point your MCP client to `/mcp` and include bearer auth.
 By default the gateway refuses to start without `gateway.api_key`; set `gateway.allow_unauthenticated: true` only when you intentionally want an open deployment.
 Set `gateway.public_tools_catalog: true` only if you want `GET /tools` to be browsable without auth; execution endpoints remain protected.
 For multi-user auth, set `gateway.auth_mode: "postgres_api_keys"`, keep `DATABASE_URL` set, and optionally configure `gateway.bootstrap_admin_api_key` for break-glass admin access.
+The gateway only supports MCP protocol version `2025-11-25`; older MCP protocol versions are rejected.
 In `postgres_api_keys` mode, `admin` retains full platform access. Non-admin API-key users authenticate successfully, but tool execution and admin access come from PyCasbin group memberships plus integration or platform grants.
 
 To seed the first database-backed admin key:
@@ -189,6 +190,24 @@ The Postgres integration test boots the aiohttp app, one HTTP fixture upstream, 
 docker compose up -d postgres
 export MCP_GATEWAY_TEST_DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway'
 pytest tests/test_integration_app.py
+```
+
+## Metrics
+
+Prometheus metrics keep `upstream_id` so MCP call volume is easy to query by integration over time.
+
+Useful counters:
+
+- `mcp_gateway_tool_calls_total{upstream_id,success,cache_hit}`
+- `mcp_gateway_upstream_calls_total{upstream_id,method,success}`
+- `mcp_gateway_denials_total{upstream_id}`
+
+Example query:
+
+```promql
+sum by (upstream_id) (
+  increase(mcp_gateway_tool_calls_total[1h])
+)
 ```
 
 ## Docs

@@ -109,7 +109,9 @@ upstreams:
       - "https://aws-mcp.us-east-1.api.aws/mcp"
       - "--metadata"
       - "AWS_REGION=us-east-1"
-    env: {}
+    env:
+      AWS_ACCESS_KEY_ID: "..."
+      AWS_SECRET_ACCESS_KEY: "..."
     deny_tools: []
     tool_routes:
       - "aws."

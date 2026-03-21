@@ -17,19 +17,25 @@ class GatewayTelemetry:
         self._prom_responses_total = Counter(
             "mcp_gateway_responses_total",
             "Total MCP responses emitted.",
-            ["method", "success", "cache_hit", "upstream_id", "tool_name"],
+            ["method", "success", "cache_hit", "upstream_id"],
             registry=self._prom_registry,
         )
         self._prom_response_latency_ms = Histogram(
             "mcp_gateway_response_latency_ms",
             "MCP response latency in milliseconds.",
-            ["method", "success", "cache_hit", "upstream_id", "tool_name"],
+            ["method", "success", "cache_hit", "upstream_id"],
             registry=self._prom_registry,
         )
         self._prom_denials_total = Counter(
             "mcp_gateway_denials_total",
             "Total denied tool calls.",
-            ["upstream_id", "tool_name"],
+            ["upstream_id"],
+            registry=self._prom_registry,
+        )
+        self._prom_tool_calls_total = Counter(
+            "mcp_gateway_tool_calls_total",
+            "Total tool call outcomes by integration.",
+            ["upstream_id", "success", "cache_hit"],
             registry=self._prom_registry,
         )
         self._prom_upstream_calls_total = Counter(
@@ -56,17 +62,18 @@ class GatewayTelemetry:
             "success": str(success).lower(),
             "cache_hit": str(cache_hit).lower(),
             "upstream_id": upstream_id or "none",
-            "tool_name": tool_name or "none",
         }
         self._prom_responses_total.labels(**attrs).inc()
         self._prom_response_latency_ms.labels(**attrs).observe(max(0, latency_ms))
+        if method == "tools/call":
+            self._prom_tool_calls_total.labels(
+                upstream_id=upstream_id or "none",
+                success=str(success).lower(),
+                cache_hit=str(cache_hit).lower(),
+            ).inc()
 
     def record_denial(self, upstream_id: Optional[str], tool_name: Optional[str]) -> None:
-        attrs = {
-            "upstream_id": upstream_id or "none",
-            "tool_name": tool_name or "none",
-        }
-        self._prom_denials_total.labels(**attrs).inc()
+        self._prom_denials_total.labels(upstream_id=upstream_id or "none").inc()
 
     def record_upstream_outcome(self, upstream_id: str, method: str, success: bool) -> None:
         attrs = {

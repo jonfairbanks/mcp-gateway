@@ -112,6 +112,7 @@ Common:
 - `http_headers` optional static headers
 - `bearer_token_env_var` optional env var name used if `Authorization` is not provided in `http_headers`
 - `http_serialize_requests` default `false` (concurrent HTTP calls enabled). Set `true` to force one-at-a-time requests for that upstream.
+- Only MCP protocol version `2025-11-25` is supported by the gateway. Older protocol versions are rejected.
 
 ## Example
 

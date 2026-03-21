@@ -223,3 +223,44 @@ gateway:
 
     with pytest.raises(ValueError, match="MCP_GATEWAY_API_KEY"):
         load_config(str(config_file))
+
+
+def test_rejects_non_mapping_env_block(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+upstreams:
+  - id: "aws-mcp"
+    transport: "stdio"
+    command: "uvx"
+    env:
+      - AWS_ACCESS_KEY_ID=abc
+      - AWS_SECRET_ACCESS_KEY=def
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"upstreams\[aws-mcp\]\.env must be a mapping"):
+        load_config(str(config_file))
+
+
+def test_rejects_non_mapping_http_headers_block(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+upstreams:
+  - id: "github"
+    transport: "streamable_http"
+    endpoint: "https://example.com/mcp"
+    http_headers:
+      - Authorization=Bearer token
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"upstreams\[github\]\.http_headers must be a mapping"):
+        load_config(str(config_file))
