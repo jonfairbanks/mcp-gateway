@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "a21564bb-4a7f-4fd4-b127-a8db3c02b415",
     "name": "MCP Gateway",
-    "description": "Postman collection for the MCP Gateway HTTP API. Set the collection variables `base_url` and `admin_token` first. Requests under Self Service and MCP Transport use `user_token`, which can be populated automatically by the Admin Create User request when `issue_api_key` is true.",
+    "description": "Postman collection for the MCP Gateway HTTP API. Set the collection variables `base_url` and `admin_token` first. Requests under Self Service and MCP Transport use `user_token`, which can be populated automatically by the Admin Create User request when `issue_api_key` is true. MCP transport requests target `POST /mcp` and send `MCP-Protocol-Version: {{protocol_version}}`.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -29,6 +29,10 @@
       "value": "change-me-user"
     },
     {
+      "key": "protocol_version",
+      "value": "2025-11-25"
+    },
+    {
       "key": "subject",
       "value": "alice"
     },
@@ -46,7 +50,7 @@
     },
     {
       "key": "upstream_id",
-      "value": "jira"
+      "value": "github"
     },
     {
       "key": "permission",
@@ -54,11 +58,12 @@
     },
     {
       "key": "tool_name",
-      "value": "jira.search"
+      "value": ""
     },
     {
       "key": "session_id",
-      "value": ""
+      "value": "",
+      "disabled": true
     }
   ],
   "item": [
@@ -116,6 +121,90 @@
       "name": "MCP Transport",
       "item": [
         {
+          "name": "POST /mcp initialize",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{user_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "MCP-Protocol-Version",
+                "value": "{{protocol_version}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": \"initialize-1\",\n  \"method\": \"initialize\",\n  \"params\": {\n    \"protocolVersion\": \"{{protocol_version}}\",\n    \"capabilities\": {},\n    \"clientInfo\": {\n      \"name\": \"postman\",\n      \"version\": \"1.0\"\n    }\n  }\n}"
+            },
+            "url": "{{base_url}}/mcp",
+            "description": "Initialize the MCP session and negotiate the current protocol version."
+          }
+        },
+        {
+          "name": "GET /mcp",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{user_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "MCP-Protocol-Version",
+                "value": "{{protocol_version}}"
+              }
+            ],
+            "url": "{{base_url}}/mcp",
+            "description": "Method probe. The gateway does not offer GET SSE streams on `/mcp` and returns HTTP 405 with `Allow: POST`."
+          }
+        },
+        {
+          "name": "DELETE /mcp",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{user_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "MCP-Protocol-Version",
+                "value": "{{protocol_version}}"
+              }
+            ],
+            "url": "{{base_url}}/mcp",
+            "description": "Method probe. The gateway does not support session deletion on `/mcp` and returns HTTP 405 with `Allow: POST`."
+          }
+        },
+        {
           "name": "POST /mcp tools/list",
           "request": {
             "auth": {
@@ -133,6 +222,14 @@
               {
                 "key": "Content-Type",
                 "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "MCP-Protocol-Version",
+                "value": "{{protocol_version}}"
               }
             ],
             "body": {
@@ -140,7 +237,7 @@
               "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": \"tools-list-1\",\n  \"method\": \"tools/list\",\n  \"params\": {}\n}"
             },
             "url": "{{base_url}}/mcp",
-            "description": "Merged MCP tool discovery."
+            "description": "Merged MCP tool discovery over the current protocol version."
           }
         },
         {
@@ -161,6 +258,14 @@
               {
                 "key": "Content-Type",
                 "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "MCP-Protocol-Version",
+                "value": "{{protocol_version}}"
               }
             ],
             "body": {
@@ -192,7 +297,11 @@
               },
               {
                 "key": "Accept",
-                "value": "application/json, text/event-stream"
+                "value": "application/json"
+              },
+              {
+                "key": "MCP-Protocol-Version",
+                "value": "{{protocol_version}}"
               }
             ],
             "body": {
@@ -200,7 +309,7 @@
               "raw": "[\n  {\n    \"jsonrpc\": \"2.0\",\n    \"id\": \"batch-1\",\n    \"method\": \"tools/list\",\n    \"params\": {}\n  },\n  {\n    \"jsonrpc\": \"2.0\",\n    \"method\": \"notifications/initialized\",\n    \"params\": {}\n  }\n]"
             },
             "url": "{{base_url}}/mcp",
-            "description": "Streamable HTTP batch request. Notification-only inputs return HTTP 202 with no body."
+            "description": "JSON-RPC batch request on `POST /mcp`. Notification-only inputs return HTTP 202 with no body."
           }
         }
       ]
