@@ -38,10 +38,23 @@ def format_startup_summary(summary: Dict[str, Any]) -> str:
 class Logger:
     stdout_json: bool
 
+    def _format_text(self, payload: Dict[str, Any]) -> str:
+        level = str(payload.get("level", "info")).upper()
+        event = str(payload.get("event", "log"))
+        field_parts: list[str] = []
+        for key, value in payload.items():
+            if key in {"level", "event"}:
+                continue
+            field_parts.append(f"{key}={json.dumps(value, sort_keys=True, separators=(',', ':'))}")
+        suffix = f" {' '.join(field_parts)}" if field_parts else ""
+        return f"{level} {event}{suffix}\n"
+
     def _emit(self, payload: Dict[str, Any]) -> None:
         if self.stdout_json:
             sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
-            sys.stdout.flush()
+        else:
+            sys.stdout.write(self._format_text(payload))
+        sys.stdout.flush()
 
     def info(self, event: str, **fields: Any) -> None:
         self._emit({"level": "info", "event": event, **fields})

@@ -61,8 +61,6 @@ def _config(*, auth_mode: str, api_key: str = "", bootstrap_admin_api_key: str =
             rate_limit_per_minute=120,
             circuit_breaker_fail_threshold=10,
             circuit_breaker_open_seconds=30,
-            sse_queue_max_messages=100,
-            max_sse_sessions=1000,
         ),
         logging=LoggingConfig(stdout_json=False, extra_redact_fields=[]),
         cache=CacheConfig(enabled=True, max_entries=100, default_ttl_minutes=60, client_scoped_tools=[]),

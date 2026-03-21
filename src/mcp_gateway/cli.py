@@ -21,9 +21,9 @@ CACHE_CLEANUP_INTERVAL_SECONDS = 300.0
 
 
 def _emit_cli_feedback(logger: Logger, level: str, event: str, **fields) -> None:
-    log_method = getattr(logger, level)
-    log_method(event, **fields)
     if getattr(logger, "stdout_json", True):
+        log_method = getattr(logger, level)
+        log_method(event, **fields)
         return
 
     reason = fields.get("reason") or event.replace("_", " ")
@@ -97,7 +97,7 @@ def _validate_database_runtime(config, logger: Logger, dsn: str) -> None:
         "database_required",
         reason="DATABASE_URL not set",
         auth_mode=config.gateway.auth_mode,
-            suggestion="Set DATABASE_URL or switch gateway.auth_mode to single_shared",
+        suggestion="Set DATABASE_URL or switch gateway.auth_mode to single_shared",
     )
     raise SystemExit(2)
 
@@ -108,11 +108,16 @@ async def _run_cache_cleanup_loop(store: PostgresStore, logger: Logger) -> None:
             await asyncio.sleep(CACHE_CLEANUP_INTERVAL_SECONDS)
             try:
                 deleted_rows = await store.cleanup_expired_cache()
+                deleted_rate_limit_rows = await store.cleanup_expired_rate_limits()
             except Exception as exc:  # noqa: BLE001
                 logger.warn("cache_cleanup_failed", error=str(exc))
                 continue
-            if deleted_rows > 0:
-                logger.info("cache_cleanup", deleted_rows=deleted_rows)
+            if deleted_rows > 0 or deleted_rate_limit_rows > 0:
+                logger.info(
+                    "cache_cleanup",
+                    deleted_rows=deleted_rows,
+                    rate_limit_deleted_rows=deleted_rate_limit_rows,
+                )
     except asyncio.CancelledError:
         pass
 

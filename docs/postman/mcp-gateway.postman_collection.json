@@ -172,31 +172,7 @@
           }
         },
         {
-          "name": "GET /sse",
-          "request": {
-            "auth": {
-              "type": "bearer",
-              "bearer": [
-                {
-                  "key": "token",
-                  "value": "{{user_token}}",
-                  "type": "string"
-                }
-              ]
-            },
-            "method": "GET",
-            "header": [
-              {
-                "key": "Accept",
-                "value": "text/event-stream"
-              }
-            ],
-            "url": "{{base_url}}/sse",
-            "description": "Opens an MCP SSE session. The first `ready` event contains the session id."
-          }
-        },
-        {
-          "name": "POST /message",
+          "name": "POST /mcp batch",
           "request": {
             "auth": {
               "type": "bearer",
@@ -215,32 +191,16 @@
                 "value": "application/json"
               },
               {
-                "key": "MCP-Session-ID",
-                "value": "{{session_id}}",
-                "disabled": true
+                "key": "Accept",
+                "value": "application/json, text/event-stream"
               }
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": \"message-1\",\n  \"method\": \"tools/list\",\n  \"params\": {}\n}"
+              "raw": "[\n  {\n    \"jsonrpc\": \"2.0\",\n    \"id\": \"batch-1\",\n    \"method\": \"tools/list\",\n    \"params\": {}\n  },\n  {\n    \"jsonrpc\": \"2.0\",\n    \"method\": \"notifications/initialized\",\n    \"params\": {}\n  }\n]"
             },
-            "url": {
-              "raw": "{{base_url}}/message?session_id={{session_id}}",
-              "host": [
-                "{{base_url}}"
-              ],
-              "path": [
-                "message"
-              ],
-              "query": [
-                {
-                  "key": "session_id",
-                  "value": "{{session_id}}",
-                  "disabled": true
-                }
-              ]
-            },
-            "description": "Send a JSON-RPC request through the HTTP message endpoint. Enable either the query param or the header once you have a session id."
+            "url": "{{base_url}}/mcp",
+            "description": "Streamable HTTP batch request. Notification-only inputs return HTTP 202 with no body."
           }
         }
       ]

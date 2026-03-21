@@ -7,8 +7,6 @@ gateway:
   allow_unauthenticated: false
   public_tools_catalog: false
   rate_limit_per_minute: 120
-  sse_queue_max_messages: 100
-  max_sse_sessions: 1000
 
 logging:
   stdout_json: true
@@ -138,7 +136,7 @@ upstreams:
 
   - id: "github"
     name: "github"
-    transport: "http_sse"
+    transport: "streamable_http"
     endpoint: "https://api.githubcopilot.com/mcp/"
     bearer_token_env_var: "GITHUB_PAT_TOKEN"
     timeout_ms: 30000

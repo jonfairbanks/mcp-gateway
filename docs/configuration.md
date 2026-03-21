@@ -31,8 +31,6 @@ String values support explicit env interpolation:
 - `rate_limit_per_minute` default `120`
 - `circuit_breaker_fail_threshold` default `20`
 - `circuit_breaker_open_seconds` default `30`
-- `sse_queue_max_messages` default `100`
-- `max_sse_sessions` default `1000`
 
 ## `logging`
 
@@ -87,7 +85,7 @@ Role behavior:
 Required:
 
 - `id`
-- `transport` (`stdio` or `http_sse`)
+- `transport` (`stdio` or `streamable_http`)
 
 Common:
 
@@ -108,7 +106,7 @@ Common:
 - `cwd` optional working directory
 - `stdio_read_limit_bytes` default `104857600` (100 MB)
 
-### `http_sse` upstream fields
+### `streamable_http` upstream fields
 
 - `endpoint` JSON-RPC HTTP endpoint
 - `http_headers` optional static headers
@@ -126,8 +124,6 @@ gateway:
   bootstrap_admin_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY:-}"
   allow_unauthenticated: false
   public_tools_catalog: false
-  sse_queue_max_messages: 100
-  max_sse_sessions: 1000
 
 logging:
   stdout_json: true
@@ -159,9 +155,9 @@ upstreams:
       - "--no-usage-statistics"
     deny_tools: []
 
-  - id: "notion-sse"
-    name: "notion-sse"
-    transport: "http_sse"
+  - id: "notion-remote"
+    name: "notion-remote"
+    transport: "streamable_http"
     endpoint: "https://mcp.notion.com/mcp"
     http_serialize_requests: false
     http_headers:
