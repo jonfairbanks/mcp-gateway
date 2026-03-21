@@ -165,7 +165,7 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging()
                         "result": {
                             "protocolVersion": payload.get("params", {}).get("protocolVersion", CURRENT_PROTOCOL_VERSION),
                             "capabilities": {"tools": {}},
-                            "serverInfo": {"name": "fake-http-upstream", "version": "0.1.0"},
+                            "serverInfo": {"name": "fake-http-upstream", "version": "1.0.0"},
                         },
                     }
                 )
@@ -243,7 +243,7 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging()
                                 "params": {
                                     "protocolVersion": CURRENT_PROTOCOL_VERSION,
                                     "capabilities": {},
-                                    "clientInfo": {"name": "phase-1-test", "version": "0.1.0"},
+                                    "clientInfo": {"name": "phase-1-test", "version": "1.0.0"},
                                 },
                             },
                         )
@@ -332,7 +332,7 @@ def test_rate_limits_apply_across_two_gateway_instances_with_shared_postgres() -
                         "result": {
                             "protocolVersion": payload.get("params", {}).get("protocolVersion", CURRENT_PROTOCOL_VERSION),
                             "capabilities": {"tools": {}},
-                            "serverInfo": {"name": "fake-http-upstream", "version": "0.1.0"},
+                            "serverInfo": {"name": "fake-http-upstream", "version": "1.0.0"},
                         },
                     }
                 )
@@ -421,7 +421,7 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> N
                         "result": {
                             "protocolVersion": payload.get("params", {}).get("protocolVersion", CURRENT_PROTOCOL_VERSION),
                             "capabilities": {"tools": {}},
-                            "serverInfo": {"name": "fake-http-upstream", "version": "0.1.0"},
+                            "serverInfo": {"name": "fake-http-upstream", "version": "1.0.0"},
                         },
                     }
                 )

@@ -796,6 +796,8 @@ class Gateway:
         if self._is_upstream_breaker_open(upstream.id):
             raise RuntimeError(f"Upstream circuit breaker open: {upstream.id}")
         client = await self._get_upstream_client(upstream)
+        # `max_in_flight` is enforced per upstream so one slow integration does not
+        # starve unrelated upstream traffic.
         semaphore = self._upstream_semaphores.setdefault(upstream.id, asyncio.Semaphore(max(1, upstream.max_in_flight)))
         async with semaphore:
             return await client.call(payload)
@@ -1139,7 +1141,7 @@ class Gateway:
         successful = 0
         merged_capabilities: Dict[str, Any] = {}
         server_name = "mcp-gateway"
-        server_version = "0.1.0"
+        server_version = "1.0.0"
         params = payload.get("params")
         requested_protocol_version = params.get("protocolVersion") if isinstance(params, dict) else None
         negotiated_protocol_version = negotiate_protocol_version(requested_protocol_version)
@@ -1218,7 +1220,7 @@ class Gateway:
             "params": {
                 "protocolVersion": CURRENT_PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "mcp-gateway", "version": "0.1.0"},
+                "clientInfo": {"name": "mcp-gateway", "version": "1.0.0"},
             },
         }
         init_execution = await self._execute_upstream_operation(upstream, "initialize", init_payload)

@@ -1455,7 +1455,7 @@ def test_mcp_post_handler_returns_negotiated_protocol_header_on_initialize() -> 
             "params": {
                 "protocolVersion": CURRENT_PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "test-client", "version": "0.1.0"},
+                "clientInfo": {"name": "test-client", "version": "1.0.0"},
             },
         }
 
@@ -1467,7 +1467,7 @@ def test_mcp_post_handler_returns_negotiated_protocol_header_on_initialize() -> 
                 "result": {
                     "protocolVersion": CURRENT_PROTOCOL_VERSION,
                     "capabilities": {},
-                    "serverInfo": {"name": "mcp-gateway", "version": "0.1.0"},
+                    "serverInfo": {"name": "mcp-gateway", "version": "1.0.0"},
                 },
             },
             success=True,
