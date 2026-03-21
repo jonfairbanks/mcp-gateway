@@ -1258,7 +1258,7 @@ class HttpServer:
         )
 
     async def mcp_get_handler(self, request: web.Request) -> web.Response:
-        return web.Response(status=405, headers={"Allow": "POST"}, text="This endpoint does not offer GET SSE streams.")
+        return web.Response(status=405, headers={"Allow": "POST, DELETE"}, text="This endpoint does not support GET requests.")
 
     async def mcp_delete_handler(self, request: web.Request) -> web.Response:
         return web.Response(status=405, headers={"Allow": "POST"}, text="This endpoint does not support session deletion.")
