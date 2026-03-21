@@ -86,7 +86,9 @@ upstreams:
     name: "context7"
     transport: "stdio"
     command: "npx"
-    args: ["-y", "@upstash/context7-mcp"]
+    args:
+      - "-y"
+      - "@upstash/context7-mcp"
     env: {}
 
   - id: "github"
@@ -190,7 +192,9 @@ Recommended pattern:
 - id: "context7"
   transport: "stdio"
   command: "npx"
-  args: ["-y", "@upstash/context7-mcp"]
+  args:
+    - "-y"
+    - "@upstash/context7-mcp"
   env: {}
 ```
 

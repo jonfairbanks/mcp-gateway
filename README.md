@@ -71,34 +71,24 @@ curl -H 'Authorization: Bearer change-me' http://localhost:8080/tools
 
 ```yaml
 gateway:
-  listen_host: "0.0.0.0"
-  listen_port: 8080
   auth_mode: "single_shared"
   api_key: "${MCP_GATEWAY_API_KEY}"
-  bootstrap_admin_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY:-}"
-  allow_unauthenticated: false
-  public_tools_catalog: false
-  trusted_proxies: ["127.0.0.1", "::1"]
-  request_max_bytes: 2097152
-  rate_limit_per_minute: 120
 
 logging:
   stdout_json: true
-  extra_redact_fields: []
 
 cache:
   enabled: true
-  max_entries: 10000
   default_ttl_minutes: 60
-  client_scoped_tools: []
 
 upstreams:
   - id: "context7"
     name: "context7"
     transport: "stdio"
     command: "npx"
-    args: ["-y", "@upstash/context7-mcp"]
-    env: {}
+    args:
+      - "-y"
+      - "@upstash/context7-mcp"
 
   - id: "github"
     name: "github"
@@ -112,6 +102,8 @@ upstreams:
 
 - `${NAME}` requires the environment variable to be set
 - `${NAME:-default}` uses `default` when the variable is unset or empty
+
+This example only shows the smallest useful setup. The gateway has additional optional settings and sensible defaults; see [docs/configuration.md](docs/configuration.md) for the full configuration surface.
 
 ## Guide Map
 
