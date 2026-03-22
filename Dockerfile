@@ -19,8 +19,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml README.md /app/
+RUN python - <<'PY' > /tmp/requirements.txt
+import tomllib
+
+with open("/app/pyproject.toml", "rb") as f:
+    project = tomllib.load(f)["project"]
+
+for dependency in project["dependencies"]:
+    print(dependency)
+PY
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
 COPY src /app/src
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --no-deps .
 
 COPY config.example.yaml schema.sql /app/
 
