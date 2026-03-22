@@ -1,2 +1,0 @@
-- [ ] Update Readme
-- [ ] Require CI checks before merge
