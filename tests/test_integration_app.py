@@ -44,7 +44,7 @@ def _gateway_config(http_endpoint: str) -> AppConfig:
             circuit_breaker_open_seconds=30,
         ),
         logging=LoggingConfig(stdout_json=False, extra_redact_fields=[]),
-        cache=CacheConfig(enabled=True, max_entries=100, default_ttl_minutes=60, client_scoped_tools=[]),
+        cache=CacheConfig(enabled=True, max_entries=100, default_ttl_minutes=60),
         upstreams=[
             UpstreamConfig(
                 id="http-fixture",
@@ -469,6 +469,7 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> N
             config = _gateway_config(str(upstream_server.make_url("/mcp")))
             config.gateway.auth_mode = "postgres_api_keys"
             config.gateway.api_key = ""
+            config.cache.allowed_tools = ["http.echo"]
 
             logger = Logger(stdout_json=False)
             telemetry_a = GatewayTelemetry()

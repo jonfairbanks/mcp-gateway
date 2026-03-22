@@ -63,7 +63,7 @@ def _config(*, auth_mode: str, api_key: str = "", bootstrap_admin_api_key: str =
             circuit_breaker_open_seconds=30,
         ),
         logging=LoggingConfig(stdout_json=False, extra_redact_fields=[]),
-        cache=CacheConfig(enabled=True, max_entries=100, default_ttl_minutes=60, client_scoped_tools=[]),
+        cache=CacheConfig(enabled=True, max_entries=100, default_ttl_minutes=60),
         upstreams=[],
     )
 

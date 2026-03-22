@@ -25,7 +25,11 @@ upstreams:
     assert config.gateway.allow_unauthenticated is False
     assert config.gateway.bootstrap_admin_api_key == ""
     assert config.gateway.public_tools_catalog is False
+    assert config.gateway.public_metrics is False
     assert config.logging.extra_redact_fields == []
+    assert config.logging.store_request_bodies is False
+    assert config.logging.store_response_bodies is False
+    assert config.cache.allowed_tools == []
     assert config.upstreams[0].http_serialize_requests is False
 
 
@@ -106,6 +110,25 @@ upstreams:
 
     config = load_config(str(config_file))
     assert config.gateway.public_tools_catalog is True
+
+
+def test_loads_public_metrics_flag(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+  public_metrics: true
+upstreams:
+  - id: "remote"
+    transport: "streamable_http"
+    endpoint: "https://example.com/mcp"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(str(config_file))
+    assert config.gateway.public_metrics is True
 
 
 def test_loads_postgres_auth_mode_and_bootstrap_key(tmp_path) -> None:
