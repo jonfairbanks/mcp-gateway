@@ -16,6 +16,10 @@ dependencies = [
   "orjson>=3.10",
   "prometheus-client>=0.20",
   "casbin>=1.36",
+  "python-dotenv>=1.0",
+  "opentelemetry-api>=1.24",
+  "opentelemetry-sdk>=1.24",
+  "opentelemetry-exporter-otlp>=1.24",
 ]
 
 [project.optional-dependencies]
@@ -42,3 +46,6 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "BLE"]
 ignore = ["E501"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

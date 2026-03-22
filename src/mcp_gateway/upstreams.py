@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 import aiohttp
+from opentelemetry.propagate import inject
 
 from .protocol import CURRENT_PROTOCOL_VERSION, is_supported_protocol_version
 
@@ -63,6 +64,7 @@ class StreamableHTTPUpstream:
         # gateway only uses POST /mcp, so keep the broader Accept header here.
         headers.setdefault("Accept", "application/json, text/event-stream")
         headers.setdefault("MCP-Protocol-Version", self._protocol_version)
+        inject(headers)
         if self._session_id:
             headers["MCP-Session-ID"] = self._session_id
         if "Authorization" not in headers:

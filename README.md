@@ -59,6 +59,8 @@ export DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway'
 mcp-gateway serve --config /path/to/config.yaml
 ```
 
+If a `.env` file is present in the working directory, `mcp-gateway` loads it automatically at startup.
+
 5. Verify the service:
 
 ```bash

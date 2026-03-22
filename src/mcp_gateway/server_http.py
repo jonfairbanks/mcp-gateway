@@ -125,6 +125,18 @@ class HttpServer:
                 return web.json_response(make_error_response(None, -32603, "Internal error"), status=500)
             return self._rest_error(500, "InternalError", "Unexpected server error.")
 
+    @web.middleware
+    async def _tracing_middleware(self, request: web.Request, handler):
+        context = self._telemetry.extract_context(request.headers)
+        with self._telemetry.start_http_server_span(request.method, request.path, context=context):
+            try:
+                response = await handler(request)
+            except Exception as exc:  # noqa: BLE001
+                self._telemetry.annotate_exception(exc)
+                raise
+            self._telemetry.annotate_http_response(response.status)
+            return response
+
     def _normalize_role(self, role: str) -> Optional[str]:
         normalized_role = role.strip().lower()
         if normalized_role not in VALID_ROLES:
@@ -144,7 +156,7 @@ class HttpServer:
 
     async def _parse_rest_json(self, request: web.Request) -> tuple[Optional[Dict[str, Any]], Optional[web.Response]]:
         payload, invalid_json = await self._parse_json_request(request)
-        if invalid_json:
+        if invalid_json is not None:
             return None, invalid_json
         if not isinstance(payload, dict):
             return None, self._rest_error(400, "InvalidRequest", "Expected a JSON object body.")
@@ -217,7 +229,7 @@ class HttpServer:
         require_principal: bool = False,
     ) -> tuple[Optional[AuthenticatedPrincipal], Optional[web.Response]]:
         principal, unauthorized = await self._authenticate(request, require_principal=require_principal)
-        if not unauthorized:
+        if unauthorized is None:
             return principal, None
         accept = request.headers.get("Accept", "")
         if unauthorized.status != 401:
@@ -366,6 +378,7 @@ class HttpServer:
         strict_auth: bool = False,
     ) -> tuple[Optional[RequestContext], Optional[web.Response]]:
         principal: Optional[AuthenticatedPrincipal] = None
+        require_auth = require_auth or strict_auth
         if require_auth:
             if endpoint:
                 principal, unauthorized = await self._authenticate_http_endpoint(
@@ -375,12 +388,12 @@ class HttpServer:
                 )
             else:
                 principal, unauthorized = await self._authenticate(request, require_principal=strict_auth)
-            if unauthorized:
+            if unauthorized is not None:
                 return None, unauthorized
         client_id = self._client_id(request)
         request_context = RequestContext(client_id=client_id, principal=principal)
         blocked = await self._rate_limit(request_context)
-        if blocked:
+        if blocked is not None:
             return None, blocked
         return request_context, None
 
@@ -466,12 +479,12 @@ class HttpServer:
         return header_version or DEFAULT_HTTP_PROTOCOL_VERSION, None
 
     async def health_handler(self, request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok", "service": "mcp-gateway", **self._gateway.status_snapshot()})
+        return web.json_response({"status": "ok"})
 
     async def ready_handler(self, request: web.Request) -> web.Response:
         ready = self._gateway.is_ready()
         status = 200 if ready else 503
-        return web.json_response({"ready": ready, **self._gateway.status_snapshot()}, status=status)
+        return web.json_response({"ready": ready}, status=status)
 
     async def tools_handler(self, request: web.Request) -> web.Response:
         _, blocked = await self._preflight_request(
@@ -479,21 +492,25 @@ class HttpServer:
             endpoint="/tools",
             require_auth=not self._config.gateway.public_tools_catalog,
         )
-        if blocked:
+        if blocked is not None:
             return blocked
         payload = await self._gateway.tools_catalog()
         return web.json_response(payload)
 
     async def metrics_handler(self, request: web.Request) -> web.Response:
+        if not self._config.gateway.public_metrics:
+            _, blocked = await self._preflight_request(request, endpoint="/metrics", strict_auth=True)
+            if blocked is not None:
+                return blocked
         body = self._telemetry.render_prometheus()
         return web.Response(body=body, headers={"Content-Type": self._telemetry.prometheus_content_type})
 
     async def me_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/me", strict_auth=True)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         user = None
@@ -503,10 +520,10 @@ class HttpServer:
 
     async def my_api_keys_list_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_legacy_api_key_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/me/api-keys", strict_auth=True)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         principal = request_context.principal
@@ -518,10 +535,10 @@ class HttpServer:
 
     async def my_api_keys_create_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_legacy_api_key_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/me/api-keys", strict_auth=True)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         principal = request_context.principal
@@ -529,7 +546,7 @@ class HttpServer:
         if not principal.user_id:
             return self._rest_error(400, "InvalidPrincipal", "This principal is not linked to a managed user.")
         body, invalid_body = await self._parse_rest_json(request)
-        if invalid_body:
+        if invalid_body is not None:
             return invalid_body
         assert body is not None
         label = body.get("label", "default")
@@ -561,10 +578,10 @@ class HttpServer:
 
     async def my_api_keys_revoke_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_legacy_api_key_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/me/api-keys", strict_auth=True)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         principal = request_context.principal
@@ -581,24 +598,24 @@ class HttpServer:
 
     async def admin_users_list_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_legacy_api_key_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/admin/users", strict_auth=True)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(request_context, "/v1/admin/users", PLATFORM_PERMISSION_IDENTITIES_READ)
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         items = await self._gateway.list_users()
         return web.json_response({"items": items})
 
     async def admin_users_create_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_legacy_api_key_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/admin/users", strict_auth=True)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -606,10 +623,10 @@ class HttpServer:
             "/v1/admin/users",
             PLATFORM_PERMISSION_IDENTITIES_WRITE,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         body, invalid_body = await self._parse_rest_json(request)
-        if invalid_body:
+        if invalid_body is not None:
             return invalid_body
         assert body is not None
         subject = body.get("subject")
@@ -668,10 +685,10 @@ class HttpServer:
 
     async def admin_users_update_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_legacy_api_key_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/admin/users", strict_auth=True)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -679,13 +696,13 @@ class HttpServer:
             "/v1/admin/users",
             PLATFORM_PERMISSION_IDENTITIES_WRITE,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         user_id = request.match_info.get("user_id", "").strip()
         if not user_id:
             return self._rest_error(400, "InvalidRequest", "user_id is required.")
         body, invalid_body = await self._parse_rest_json(request)
-        if invalid_body:
+        if invalid_body is not None:
             return invalid_body
         assert body is not None
         display_name = body.get("display_name")
@@ -730,10 +747,10 @@ class HttpServer:
 
     async def admin_identities_list_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/admin/identities", strict_auth=True)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -741,21 +758,21 @@ class HttpServer:
             "/v1/admin/identities",
             PLATFORM_PERMISSION_IDENTITIES_READ,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         items = await self._gateway.list_identities()
         return web.json_response({"items": items})
 
     async def admin_identity_put_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(
             request,
             endpoint="/v1/admin/identities",
             strict_auth=True,
         )
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -763,13 +780,13 @@ class HttpServer:
             "/v1/admin/identities",
             PLATFORM_PERMISSION_IDENTITIES_WRITE,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         subject = request.match_info.get("subject", "").strip()
         if not subject:
             return self._rest_error(400, "InvalidRequest", "subject is required.")
         body, invalid_body = await self._parse_rest_json(request)
-        if invalid_body:
+        if invalid_body is not None:
             return invalid_body
         assert body is not None
         display_name = body.get("display_name")
@@ -791,14 +808,14 @@ class HttpServer:
 
     async def admin_identity_patch_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(
             request,
             endpoint="/v1/admin/identities",
             strict_auth=True,
         )
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -806,13 +823,13 @@ class HttpServer:
             "/v1/admin/identities",
             PLATFORM_PERMISSION_IDENTITIES_WRITE,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         subject = request.match_info.get("subject", "").strip()
         if not subject:
             return self._rest_error(400, "InvalidRequest", "subject is required.")
         body, invalid_body = await self._parse_rest_json(request)
-        if invalid_body:
+        if invalid_body is not None:
             return invalid_body
         assert body is not None
         display_name = body.get("display_name")
@@ -836,14 +853,14 @@ class HttpServer:
 
     async def admin_integrations_list_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(
             request,
             endpoint="/v1/admin/integrations",
             strict_auth=True,
         )
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -851,38 +868,38 @@ class HttpServer:
             "/v1/admin/integrations",
             PLATFORM_PERMISSION_GROUPS_READ,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         items = await self._gateway.list_integrations()
         return web.json_response({"items": items})
 
     async def admin_groups_list_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/admin/groups", strict_auth=True)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(request_context, "/v1/admin/groups", PLATFORM_PERMISSION_GROUPS_READ)
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         items = await self._gateway.list_groups()
         return web.json_response({"items": items})
 
     async def admin_groups_create_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/admin/groups", strict_auth=True)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(request_context, "/v1/admin/groups", PLATFORM_PERMISSION_GROUPS_WRITE)
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         body, invalid_body = await self._parse_rest_json(request)
-        if invalid_body:
+        if invalid_body is not None:
             return invalid_body
         assert body is not None
         name = body.get("name")
@@ -895,27 +912,27 @@ class HttpServer:
             group = await self._gateway.create_group(name=name.strip(), description=description)
         except ValueError as exc:
             self._log_invalid_request_exception("/v1/admin/groups", exc, operation="create_group")
-            return self._invalid_request_response("/v1/admin/groups", str(exc), operation="create_group")
+            return self._invalid_request_response("/v1/admin/groups", "Invalid group creation request.", operation="create_group")
         if group is None:
             return self._rest_error(409, "Conflict", "A group with that name already exists.")
         return web.json_response(group, status=201)
 
     async def admin_groups_update_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/admin/groups", strict_auth=True)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(request_context, "/v1/admin/groups", PLATFORM_PERMISSION_GROUPS_WRITE)
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         group_id = request.match_info.get("group_id", "").strip()
         if not group_id:
             return self._rest_error(400, "InvalidRequest", "group_id is required.")
         body, invalid_body = await self._parse_rest_json(request)
-        if invalid_body:
+        if invalid_body is not None:
             return invalid_body
         assert body is not None
         name = body.get("name")
@@ -928,21 +945,21 @@ class HttpServer:
             group = await self._gateway.update_group(group_id, name=name, description=description)
         except ValueError as exc:
             self._log_invalid_request_exception("/v1/admin/groups", exc, operation="update_group")
-            return self._invalid_request_response("/v1/admin/groups", str(exc), operation="update_group")
+            return self._invalid_request_response("/v1/admin/groups", "Invalid group update request.", operation="update_group")
         if group is None:
             return self._rest_error(404, "NotFound", "Group not found.")
         return web.json_response(group)
 
     async def admin_groups_delete_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/admin/groups", strict_auth=True)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(request_context, "/v1/admin/groups", PLATFORM_PERMISSION_GROUPS_WRITE)
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         group_id = request.match_info.get("group_id", "").strip()
         if not group_id:
@@ -954,14 +971,14 @@ class HttpServer:
 
     async def admin_group_members_add_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(
             request,
             endpoint="/v1/admin/groups/members",
             strict_auth=True,
         )
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -969,13 +986,13 @@ class HttpServer:
             "/v1/admin/groups/members",
             PLATFORM_PERMISSION_GROUPS_WRITE,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         group_id = request.match_info.get("group_id", "").strip()
         if not group_id:
             return self._rest_error(400, "InvalidRequest", "group_id is required.")
         body, invalid_body = await self._parse_rest_json(request)
-        if invalid_body:
+        if invalid_body is not None:
             return invalid_body
         assert body is not None
         subject = body.get("subject")
@@ -986,14 +1003,14 @@ class HttpServer:
 
     async def admin_group_members_delete_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(
             request,
             endpoint="/v1/admin/groups/members",
             strict_auth=True,
         )
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -1001,7 +1018,7 @@ class HttpServer:
             "/v1/admin/groups/members",
             PLATFORM_PERMISSION_GROUPS_WRITE,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         group_id = request.match_info.get("group_id", "").strip()
         subject = request.match_info.get("subject", "").strip()
@@ -1014,14 +1031,14 @@ class HttpServer:
 
     async def admin_group_integration_grants_list_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(
             request,
             endpoint="/v1/admin/groups/integration-grants",
             strict_auth=True,
         )
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -1029,7 +1046,7 @@ class HttpServer:
             "/v1/admin/groups/integration-grants",
             PLATFORM_PERMISSION_GROUPS_READ,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         group_id = request.match_info.get("group_id", "").strip()
         if not group_id:
@@ -1039,14 +1056,14 @@ class HttpServer:
 
     async def admin_group_integration_grants_create_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(
             request,
             endpoint="/v1/admin/groups/integration-grants",
             strict_auth=True,
         )
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -1054,13 +1071,13 @@ class HttpServer:
             "/v1/admin/groups/integration-grants",
             PLATFORM_PERMISSION_GROUPS_WRITE,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         group_id = request.match_info.get("group_id", "").strip()
         if not group_id:
             return self._rest_error(400, "InvalidRequest", "group_id is required.")
         body, invalid_body = await self._parse_rest_json(request)
-        if invalid_body:
+        if invalid_body is not None:
             return invalid_body
         assert body is not None
         upstream_id = body.get("upstream_id")
@@ -1076,21 +1093,21 @@ class HttpServer:
             )
             return self._invalid_request_response(
                 "/v1/admin/groups/integration-grants",
-                str(exc),
+                "Invalid integration grant request.",
                 operation="add_group_integration_grant",
             )
         return web.json_response(grant, status=201)
 
     async def admin_group_integration_grants_delete_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(
             request,
             endpoint="/v1/admin/groups/integration-grants",
             strict_auth=True,
         )
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -1098,7 +1115,7 @@ class HttpServer:
             "/v1/admin/groups/integration-grants",
             PLATFORM_PERMISSION_GROUPS_WRITE,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         group_id = request.match_info.get("group_id", "").strip()
         upstream_id = request.match_info.get("upstream_id", "").strip()
@@ -1111,14 +1128,14 @@ class HttpServer:
 
     async def admin_group_platform_grants_list_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(
             request,
             endpoint="/v1/admin/groups/platform-grants",
             strict_auth=True,
         )
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -1126,7 +1143,7 @@ class HttpServer:
             "/v1/admin/groups/platform-grants",
             PLATFORM_PERMISSION_GROUPS_READ,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         group_id = request.match_info.get("group_id", "").strip()
         if not group_id:
@@ -1136,14 +1153,14 @@ class HttpServer:
 
     async def admin_group_platform_grants_create_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(
             request,
             endpoint="/v1/admin/groups/platform-grants",
             strict_auth=True,
         )
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -1151,13 +1168,13 @@ class HttpServer:
             "/v1/admin/groups/platform-grants",
             PLATFORM_PERMISSION_GROUPS_WRITE,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         group_id = request.match_info.get("group_id", "").strip()
         if not group_id:
             return self._rest_error(400, "InvalidRequest", "group_id is required.")
         body, invalid_body = await self._parse_rest_json(request)
-        if invalid_body:
+        if invalid_body is not None:
             return invalid_body
         assert body is not None
         permission = body.get("permission")
@@ -1173,21 +1190,21 @@ class HttpServer:
             )
             return self._invalid_request_response(
                 "/v1/admin/groups/platform-grants",
-                str(exc),
+                "Invalid platform grant request.",
                 operation="add_group_platform_grant",
             )
         return web.json_response(grant, status=201)
 
     async def admin_group_platform_grants_delete_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(
             request,
             endpoint="/v1/admin/groups/platform-grants",
             strict_auth=True,
         )
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(
@@ -1195,7 +1212,7 @@ class HttpServer:
             "/v1/admin/groups/platform-grants",
             PLATFORM_PERMISSION_GROUPS_WRITE,
         )
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         group_id = request.match_info.get("group_id", "").strip()
         permission = request.match_info.get("permission", "").strip()
@@ -1208,14 +1225,14 @@ class HttpServer:
 
     async def admin_usage_handler(self, request: web.Request) -> web.Response:
         unavailable = self._require_postgres_management()
-        if unavailable:
+        if unavailable is not None:
             return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/admin/usage", strict_auth=True)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         forbidden = await self._require_platform_permission(request_context, "/v1/admin/usage", PLATFORM_PERMISSION_USAGE_READ)
-        if forbidden:
+        if forbidden is not None:
             return forbidden
         group_by = request.query.get("group_by", "subject")
         if group_by not in {"subject", "integration", "api_key", "user"}:
@@ -1246,7 +1263,7 @@ class HttpServer:
             )
         except ValueError as exc:
             self._log_invalid_request_exception("/v1/admin/usage", exc, field="group_by")
-            return self._invalid_request_response("/v1/admin/usage", str(exc), field="group_by")
+            return self._invalid_request_response("/v1/admin/usage", "Invalid usage query.", field="group_by")
         normalized_group_by = "subject" if group_by == "user" else group_by
         return web.json_response(
             {
@@ -1265,11 +1282,11 @@ class HttpServer:
 
     async def mcp_post_handler(self, request: web.Request) -> web.Response:
         request_context, blocked = await self._preflight_request(request)
-        if blocked:
+        if blocked is not None:
             return blocked
         assert request_context is not None
         payload, invalid_json = await self._parse_json_request(request)
-        if invalid_json:
+        if invalid_json is not None:
             return invalid_json
         protocol_version, invalid_protocol = self._effective_protocol_version(request, payload)
         if invalid_protocol is not None:
@@ -1292,7 +1309,7 @@ class HttpServer:
     def build_app(self) -> web.Application:
         app = web.Application(
             client_max_size=self._config.gateway.request_max_bytes,
-            middlewares=[self._error_middleware],
+            middlewares=[self._tracing_middleware, self._error_middleware],
         )
         app.add_routes(
             [

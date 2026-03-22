@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import yaml
@@ -35,6 +35,7 @@ class GatewayConfig:
     rate_limit_per_minute: int
     circuit_breaker_fail_threshold: int
     circuit_breaker_open_seconds: int
+    public_metrics: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
@@ -54,6 +55,7 @@ class GatewayConfig:
             rate_limit_per_minute=int(_get(data, "rate_limit_per_minute", 120)),
             circuit_breaker_fail_threshold=int(_get(data, "circuit_breaker_fail_threshold", 20)),
             circuit_breaker_open_seconds=int(_get(data, "circuit_breaker_open_seconds", 30)),
+            public_metrics=bool(_get(data, "public_metrics", False)),
         )
 
 
@@ -61,12 +63,20 @@ class GatewayConfig:
 class LoggingConfig:
     stdout_json: bool
     extra_redact_fields: List[str]
+    store_request_bodies: bool = False
+    store_response_bodies: bool = False
+    body_capture_upstreams: List[str] = field(default_factory=list)
+    body_capture_tools: List[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "LoggingConfig":
         return cls(
             stdout_json=bool(_get(data, "stdout_json", True)),
             extra_redact_fields=[str(field) for field in _string_list(_get(data, "extra_redact_fields", []), "logging.extra_redact_fields")],
+            store_request_bodies=bool(_get(data, "store_request_bodies", False)),
+            store_response_bodies=bool(_get(data, "store_response_bodies", False)),
+            body_capture_upstreams=[str(item) for item in _string_list(_get(data, "body_capture_upstreams", []), "logging.body_capture_upstreams")],
+            body_capture_tools=[str(item) for item in _string_list(_get(data, "body_capture_tools", []), "logging.body_capture_tools")],
         )
 
 
@@ -75,7 +85,8 @@ class CacheConfig:
     enabled: bool
     max_entries: int
     default_ttl_minutes: int
-    client_scoped_tools: List[str]
+    allowed_tools: List[str] = field(default_factory=list)
+    globally_shareable_tools: List[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "CacheConfig":
@@ -83,7 +94,10 @@ class CacheConfig:
             enabled=bool(_get(data, "enabled", True)),
             max_entries=int(_get(data, "max_entries", 1000)),
             default_ttl_minutes=int(_get(data, "default_ttl_minutes", 60)),
-            client_scoped_tools=[str(tool) for tool in _string_list(_get(data, "client_scoped_tools", []), "cache.client_scoped_tools")],
+            allowed_tools=[str(tool) for tool in _string_list(_get(data, "allowed_tools", []), "cache.allowed_tools")],
+            globally_shareable_tools=[
+                str(tool) for tool in _string_list(_get(data, "globally_shareable_tools", []), "cache.globally_shareable_tools")
+            ],
         )
 
 

@@ -6,17 +6,15 @@ gateway:
   bootstrap_admin_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY}"
   allow_unauthenticated: false
   public_tools_catalog: false
-  rate_limit_per_minute: 120
+  public_metrics: false
 
 logging:
   stdout_json: true
-  extra_redact_fields: []
 
 cache:
   enabled: true
-  max_entries: 10000
-  default_ttl_minutes: 60
-  client_scoped_tools: []
+  allowed_tools: []
+  globally_shareable_tools: []
 
 upstreams:
   ############

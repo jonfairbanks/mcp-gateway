@@ -5,6 +5,10 @@ import json
 from types import SimpleNamespace
 from uuid import UUID
 
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
 from mcp_gateway.config import AppConfig, CacheConfig, GatewayConfig, LoggingConfig, UpstreamConfig
 from mcp_gateway.errors import ConflictError, NotFoundError
 from mcp_gateway.gateway import Gateway, GatewayResult, UpstreamExecution
@@ -63,7 +67,7 @@ def _config_with_upstreams(upstreams: list[UpstreamConfig]) -> AppConfig:
             circuit_breaker_open_seconds=30,
         ),
         logging=LoggingConfig(stdout_json=False, extra_redact_fields=[]),
-        cache=CacheConfig(enabled=True, max_entries=100, default_ttl_minutes=60, client_scoped_tools=[]),
+        cache=CacheConfig(enabled=True, max_entries=100, default_ttl_minutes=60),
         upstreams=upstreams,
     )
 
@@ -183,6 +187,49 @@ def test_cache_key_treats_progress_token_only_meta_as_absent() -> None:
     assert key_a == key_b
 
 
+def test_cache_key_is_scoped_by_principal_by_default() -> None:
+    config = _config_with_upstreams([_upstream()])
+    config.cache.allowed_tools = ["query-docs"]
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    upstream = config.upstreams[0]
+    params = {"name": "query-docs", "arguments": {"query": "hello"}}
+
+    key_a = gateway._cache_key(upstream, "tools/call", "query-docs", params, "user:user-1")
+    key_b = gateway._cache_key(upstream, "tools/call", "query-docs", params, "user:user-2")
+
+    assert key_a != key_b
+
+
+def test_discovery_upstream_spans_are_children_of_mcp_span() -> None:
+    config = _config_with_upstreams([_upstream("context7")])
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    telemetry = GatewayTelemetry(tracer_provider=provider)
+    gateway = Gateway(config, RecordingStore(), Logger(stdout_json=False), telemetry)
+
+    async def fake_call_upstream(_upstream_config, _payload):
+        return UpstreamResponse(payload={"jsonrpc": "2.0", "id": "1", "result": {"tools": []}}, success=True)
+
+    gateway._call_upstream = fake_call_upstream
+
+    result = asyncio.run(
+        gateway.handle(
+            {"jsonrpc": "2.0", "id": "1", "method": "tools/list", "params": {}},
+            RequestContext(client_id="127.0.0.1"),
+        )
+    )
+
+    assert result.success is True
+    spans = exporter.get_finished_spans()
+    mcp_span = next(span for span in spans if span.name == "mcp.tools/list")
+    upstream_span = next(span for span in spans if span.name == "upstream.context7.tools/list")
+
+    assert upstream_span.parent is not None
+    assert upstream_span.parent.span_id == mcp_span.context.span_id
+    assert mcp_span.attributes["mcp.method"] == "tools/list"
+
+
 def test_http_auth_header_parsing() -> None:
     config = _config_with_upstreams([_upstream()])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
@@ -256,6 +303,64 @@ def test_tools_handler_can_be_public_without_auth() -> None:
     payload = json.loads(response.body.decode("utf-8"))
     assert "upstreams" in payload
     assert "tools" not in payload["upstreams"][0]
+
+
+def test_tools_catalog_uses_clear_count_names() -> None:
+    config = _config_with_upstreams([_upstream(deny_tools=["notion.updatePage"])])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    gateway._upstream_tools = {"notion": ["notion.createPage", "notion.updatePage"]}  # type: ignore[attr-defined]
+    gateway._tool_registry = {"notion.createPage": "notion"}  # type: ignore[attr-defined]
+
+    payload = asyncio.run(gateway.tools_catalog())
+
+    assert payload["exposed_tool_registry_size"] == 1
+    assert payload["upstreams"] == [
+        {
+            "id": "notion",
+            "name": "notion",
+            "available_tools": 2,
+            "exposed_tools": 1,
+            "exposed_tool_names": ["notion.createPage"],
+            "deny_tools": ["notion.updatePage"],
+        }
+    ]
+
+
+def test_metrics_handler_requires_auth_by_default() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    response = asyncio.run(server.metrics_handler(_request(headers={})))
+
+    assert response.status == 401
+
+
+def test_metrics_handler_can_be_public_when_enabled() -> None:
+    config = _config_with_upstreams([_upstream()])
+    config.gateway.public_metrics = True
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    response = asyncio.run(server.metrics_handler(_request(headers={})))
+
+    assert response.status == 200
+    assert response.headers["Content-Type"] == server._telemetry.prometheus_content_type
+
+
+def test_health_and_ready_handlers_return_minimal_public_payloads() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    gateway._warmup_status = {"notion": {"initialize_success": True, "tools_list_success": True}}
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    health_response = asyncio.run(server.health_handler(_request(headers={})))
+    ready_response = asyncio.run(server.ready_handler(_request(headers={})))
+
+    assert health_response.status == 200
+    assert json.loads(health_response.body.decode("utf-8")) == {"status": "ok"}
+    assert ready_response.status == 200
+    assert json.loads(ready_response.body.decode("utf-8")) == {"ready": True}
 
 
 def test_standard_user_can_reach_authenticated_transport() -> None:
@@ -514,6 +619,8 @@ def test_select_upstream_uses_longest_prefix_match() -> None:
 def test_redacts_sensitive_request_and_response_fields_before_storage() -> None:
     config = _config_with_upstreams([_upstream()])
     config.logging.extra_redact_fields = ["custom_secret"]
+    config.logging.store_request_bodies = True
+    config.logging.store_response_bodies = True
     store = RecordingStore()
     gateway = Gateway(config, store, Logger(stdout_json=False), GatewayTelemetry())
 
@@ -537,6 +644,8 @@ def test_redacts_sensitive_request_and_response_fields_before_storage() -> None:
             latency_ms=12,
             cache_hit=False,
             response={"error": {"data": {"access_token": "secret-token", "value": 1}}},
+            upstream_id="notion",
+            tool_name="notion.get",
         )
     )
 
@@ -550,6 +659,43 @@ def test_redacts_sensitive_request_and_response_fields_before_storage() -> None:
     assert store.response_args is not None
     assert store.response_args["response"]["error"]["data"]["access_token"] == "[REDACTED]"
     assert store.response_args["response"]["error"]["data"]["value"] == 1
+
+
+def test_request_and_response_bodies_are_not_persisted_by_default() -> None:
+    config = _config_with_upstreams([_upstream()])
+    store = RecordingStore()
+    gateway = Gateway(config, store, Logger(stdout_json=False), GatewayTelemetry())
+
+    asyncio.run(
+        gateway._safe_log_request(
+            request_id=UUID("00000000-0000-0000-0000-000000000000"),
+            method="tools/call",
+            params={"token": "abc"},
+            raw_request={"password": "pw"},
+            upstream_id="notion",
+            tool_name="notion.get",
+            request_context=RequestContext(client_id="client-1"),
+            cache_key=None,
+        )
+    )
+    asyncio.run(
+        gateway._safe_log_response(
+            response_id=UUID("00000000-0000-0000-0000-000000000001"),
+            request_id=UUID("00000000-0000-0000-0000-000000000000"),
+            success=True,
+            latency_ms=5,
+            cache_hit=False,
+            response={"result": {"secret": "value"}},
+            upstream_id="notion",
+            tool_name="notion.get",
+        )
+    )
+
+    assert store.request_args is not None
+    assert store.request_args["params"] is None
+    assert store.request_args["raw_request"] is None
+    assert store.response_args is not None
+    assert store.response_args["response"] is None
 
 
 def test_execute_upstream_operation_returns_successful_request_payload() -> None:
@@ -818,6 +964,86 @@ def test_fanout_initialize_negotiates_latest_supported_version_for_unknown_clien
     assert success is True
     assert response_payload["result"]["protocolVersion"] == CURRENT_PROTOCOL_VERSION
     assert seen_versions == [CURRENT_PROTOCOL_VERSION]
+
+
+def test_initialize_uses_warmed_capabilities_without_live_upstream_fanout() -> None:
+    config = _config_with_upstreams([_upstream("one")])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    gateway._warmup_status = {
+        "one": {
+            "initialize_success": True,
+            "tools_list_success": True,
+        }
+    }
+    gateway._server_capabilities = {"tools": {}, "prompts": {}}
+
+    async def fail_execute(*args, **kwargs):
+        raise AssertionError("initialize should not fan out when warmup is ready")
+
+    gateway._execute_upstream_operation = fail_execute  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        gateway.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": "init-1",
+                "method": "initialize",
+                "params": {"protocolVersion": CURRENT_PROTOCOL_VERSION},
+            },
+            RequestContext(client_id="127.0.0.1"),
+        )
+    )
+
+    assert result.success is True
+    assert result.payload["result"]["protocolVersion"] == CURRENT_PROTOCOL_VERSION
+    assert result.payload["result"]["capabilities"] == {"tools": {}, "prompts": {}}
+
+
+def test_tools_list_uses_warmed_registry_without_live_upstream_fanout() -> None:
+    config = _config_with_upstreams([_upstream("one")])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    gateway._warmup_status = {
+        "one": {
+            "initialize_success": True,
+            "tools_list_success": True,
+        }
+    }
+    registry_state = gateway._build_tool_registry_state(
+        [
+            (
+                config.upstreams[0],
+                [
+                    {
+                        "name": "alpha.tool",
+                        "description": "Alpha tool",
+                        "inputSchema": {"type": "object", "properties": {"value": {"type": "string"}}},
+                    }
+                ],
+            )
+        ]
+    )
+    asyncio.run(gateway._apply_tool_registry_state(registry_state))
+
+    async def fail_aggregate(*args, **kwargs):
+        raise AssertionError("tools/list should not fan out when warmup is ready")
+
+    gateway._aggregate_list = fail_aggregate  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        gateway.handle(
+            {"jsonrpc": "2.0", "id": "list-1", "method": "tools/list", "params": {}},
+            RequestContext(client_id="127.0.0.1"),
+        )
+    )
+
+    assert result.success is True
+    assert result.payload["result"]["tools"] == [
+        {
+            "name": "alpha.tool",
+            "description": "Alpha tool",
+            "inputSchema": {"type": "object", "properties": {"value": {"type": "string"}}},
+        }
+    ]
 
 
 def test_startup_summary_reports_ready_and_failed_upstreams() -> None:

@@ -48,6 +48,8 @@ export DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway'
 mcp-gateway serve --config /path/to/config.yaml
 ```
 
+If a `.env` file is present in the working directory, `mcp-gateway` loads it automatically at startup.
+
 5. Verify the service:
 
 ```bash
@@ -60,30 +62,17 @@ curl -H 'Authorization: Bearer change-me' http://localhost:8080/tools
 
 ```yaml
 gateway:
-  listen_host: "0.0.0.0"
-  listen_port: 8080
   auth_mode: "single_shared"
   api_key: "${MCP_GATEWAY_API_KEY}"
-  bootstrap_admin_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY:-}"
-  allow_unauthenticated: false
-  public_tools_catalog: false
-  trusted_proxies: ["127.0.0.1", "::1"]
-  request_max_bytes: 2097152
-  rate_limit_per_minute: 120
 
 logging:
   stdout_json: true
-  extra_redact_fields: []
 
 cache:
-  enabled: true
-  max_entries: 10000
   default_ttl_minutes: 60
-  client_scoped_tools: []
 
 upstreams:
   - id: "context7"
-    name: "context7"
     transport: "stdio"
     command: "npx"
     args:
@@ -92,17 +81,17 @@ upstreams:
     env: {}
 
   - id: "github"
-    name: "github"
     transport: "streamable_http"
     endpoint: "https://api.githubcopilot.com/mcp/"
     bearer_token_env_var: "GITHUB_PAT_TOKEN"
-    timeout_ms: 30000
 ```
 
 `config.yaml` supports explicit env interpolation:
 
 - `${NAME}` requires the environment variable to be set
 - `${NAME:-default}` uses `default` when the variable is unset or empty
+
+This example only shows the smallest useful setup. See [`docs/configuration.md`](./configuration.md) for the full configuration surface and defaults.
 
 ## Authentication Modes
 
@@ -222,6 +211,18 @@ Notes:
 - the gateway expects MCP Streamable HTTP semantics
 - if you need custom static headers, use `http_headers`
 - if the upstream requires serialized requests, set `http_serialize_requests: true`
+
+## OpenTelemetry Tracing
+
+Tracing is optional and uses standard OTEL environment variables. A common setup looks like:
+
+```bash
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+export OTEL_SERVICE_NAME=mcp-gateway
+```
+
+When enabled, the gateway emits spans for inbound HTTP requests, MCP request handling, and outbound upstream calls.
 
 ## Docker
 

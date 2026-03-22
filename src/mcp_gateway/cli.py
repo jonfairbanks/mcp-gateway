@@ -5,6 +5,9 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from .auth import AuthService
 from .config import (
@@ -18,6 +21,10 @@ from .server_http import HttpServer
 from .telemetry import GatewayTelemetry
 
 CACHE_CLEANUP_INTERVAL_SECONDS = 300.0
+
+
+def _load_environment() -> None:
+    load_dotenv(dotenv_path=Path.cwd() / ".env")
 
 
 def _emit_cli_feedback(logger: Logger, level: str, event: str, **fields) -> None:
@@ -123,6 +130,7 @@ async def _run_cache_cleanup_loop(store: PostgresStore, logger: Logger) -> None:
 
 
 async def _run_http(config_path: str) -> None:
+    _load_environment()
     config = load_config(config_path)
     logger = Logger(stdout_json=config.logging.stdout_json)
     _validate_runtime_config(config, logger)
@@ -169,6 +177,7 @@ async def _run_create_api_key(
     key_name: str,
     expires_days: int | None,
 ) -> None:
+    _load_environment()
     config = load_config(config_path)
     logger = Logger(stdout_json=False)
     dsn = os.getenv("DATABASE_URL", "")
@@ -199,6 +208,7 @@ async def _run_create_api_key(
 
 
 def main() -> None:
+    _load_environment()
     parser = build_parser()
     args = parser.parse_args()
 

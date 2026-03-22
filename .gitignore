@@ -8,3 +8,4 @@ build/
 *.egg
 pip-wheel-metadata/
 config.yaml
+.env

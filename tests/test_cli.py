@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -94,6 +95,21 @@ def test_validate_database_runtime_skips_single_shared_mode() -> None:
     cli._validate_database_runtime(config, logger, "")
 
     assert logger.errors == []
+
+
+def test_load_environment_calls_python_dotenv(monkeypatch) -> None:
+    called_with: Path | None = None
+
+    def fake_load_dotenv(*, dotenv_path: Path) -> None:
+        nonlocal called_with
+        called_with = dotenv_path
+
+    monkeypatch.setattr(cli, "load_dotenv", fake_load_dotenv)
+    monkeypatch.setattr(cli.Path, "cwd", lambda: Path("/tmp/test-cwd"))
+
+    cli._load_environment()
+
+    assert called_with == Path("/tmp/test-cwd/.env")
 
 
 def test_run_create_api_key_reports_auth_mode_misconfiguration(monkeypatch, capsys) -> None:
