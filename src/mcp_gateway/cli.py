@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -23,7 +24,7 @@ CACHE_CLEANUP_INTERVAL_SECONDS = 300.0
 
 
 def _load_environment() -> None:
-    load_dotenv()
+    load_dotenv(dotenv_path=Path.cwd() / ".env")
 
 
 def _emit_cli_feedback(logger: Logger, level: str, event: str, **fields) -> None:
