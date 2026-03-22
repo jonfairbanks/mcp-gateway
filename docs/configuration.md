@@ -33,6 +33,7 @@ Operational guidance:
 - `bootstrap_admin_api_key` optional break-glass admin token for `postgres_api_keys` mode
 - `allow_unauthenticated` default `false`; when `true`, MCP execution routes may be open, but the `/v1/me` and `/v1/admin/*` management APIs still require a valid bearer token
 - `public_tools_catalog` default `false`; when `true`, `GET /tools` skips auth but still uses rate limiting
+- `public_metrics` default `false`; when `true`, `GET /metrics` skips auth
 - `trusted_proxies` default `["127.0.0.1", "::1"]`
   - `X-Forwarded-For` and `X-Client-Id` headers are only trusted when `request.remote` is in this list.
 - `request_max_bytes` default `2097152` (2 MB)
@@ -50,15 +51,24 @@ Deployment notes:
 
 - `stdout_json` default `true`
 - `extra_redact_fields` default `[]`; additional case-insensitive payload keys redacted before request/response persistence
+- `store_request_bodies` default `false`
+- `store_response_bodies` default `false`
+- `body_capture_upstreams` default `[]`; request/response bodies for listed upstream IDs may be persisted even when global body capture is off
+- `body_capture_tools` default `[]`; request/response bodies for listed tool names may be persisted even when global body capture is off
 
 ## `cache`
 
 - `enabled` default `true`
 - `max_entries` default `1000` (in-memory cache)
 - `default_ttl_minutes` default `60`
-- `client_scoped_tools` default `[]`
+- `allowed_tools` default `[]`; only listed tools are cacheable
+- `globally_shareable_tools` default `[]`; listed tools may share cache entries across callers
 
-`client_scoped_tools` means cache keys for listed tools include `client_id` so users do not share cached results.
+Cache behavior:
+
+- no tool calls are cached unless they appear in `allowed_tools`
+- cached tools are principal-scoped by default, using API key, user, subject, or client identity
+- only tools in `globally_shareable_tools` may share cache entries across different callers
 
 The in-memory cache is only a local optimization. Shared cache correctness comes from Postgres.
 
@@ -162,7 +172,8 @@ cache:
   enabled: true
   default_ttl_minutes: 60
   max_entries: 10000
-  client_scoped_tools: []
+  allowed_tools: []
+  globally_shareable_tools: []
 
 upstreams:
   - id: "context7"

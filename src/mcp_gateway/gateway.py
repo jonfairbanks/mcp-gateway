@@ -80,6 +80,7 @@ class WarmupResult:
     upstream: UpstreamConfig
     initialize_success: bool
     initialize_error: Optional[Dict[str, Any]]
+    initialize_capabilities: Dict[str, Any]
     tools_list_success: bool
     tools_list_error: Optional[Dict[str, Any]]
     tool_names: list[str]
@@ -100,6 +101,7 @@ class Gateway:
         self._stdio_upstreams: Dict[str, StdioUpstream] = {}
         self._upstream_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._tool_registry: Dict[str, str] = {}
+        self._tool_payloads: list[Dict[str, Any]] = []
         self._tool_alias_registry: Dict[str, str] = {}
         self._upstream_tools: Dict[str, list[str]] = {u.id: [] for u in config.upstreams}
         self._registry_lock = asyncio.Lock()
@@ -110,6 +112,7 @@ class Gateway:
         self._upstream_breakers: Dict[str, Dict[str, float]] = {}
         self._global_breaker: Dict[str, float] = {"consecutive_failures": 0, "open_until": 0.0}
         self._warmup_status: Dict[str, Dict[str, Any]] = {}
+        self._server_capabilities: Dict[str, Any] = {}
         self._redact_fields = BUILTIN_REDACT_FIELDS | {
             field.strip().lower() for field in config.logging.extra_redact_fields if field.strip()
         }
@@ -300,6 +303,18 @@ class Gateway:
             return [self._redact_for_storage(item) for item in value]
         return value
 
+    def _body_capture_enabled(self, upstream_id: Optional[str], tool_name: Optional[str], *, is_response: bool) -> bool:
+        logging_config = self._config.logging
+        if is_response and logging_config.store_response_bodies:
+            return True
+        if not is_response and logging_config.store_request_bodies:
+            return True
+        if upstream_id and upstream_id in logging_config.body_capture_upstreams:
+            return True
+        if tool_name and tool_name in logging_config.body_capture_tools:
+            return True
+        return False
+
     def _duplicate_tool_message(self, duplicates: Dict[str, set[str]]) -> str:
         details = ", ".join(
             f"{tool_name} ({', '.join(sorted(upstream_ids))})"
@@ -352,6 +367,7 @@ class Gateway:
     async def _apply_tool_registry_state(self, state: ToolRegistryState) -> None:
         async with self._registry_lock:
             self._tool_registry = dict(state.registry)
+            self._tool_payloads = [dict(tool) for tool in state.tools]
             self._tool_alias_registry = self._build_tool_alias_registry(state.registry)
             self._upstream_tools = {upstream_id: list(tool_names) for upstream_id, tool_names in state.upstream_tools.items()}
 
@@ -385,8 +401,12 @@ class Gateway:
         request_context: RequestContext,
         cache_key: Optional[str],
     ) -> None:
-        redacted_params = self._redact_for_storage(params) if params is not None else None
-        redacted_raw_request = self._redact_for_storage(raw_request)
+        if self._body_capture_enabled(upstream_id, tool_name, is_response=False):
+            redacted_params = self._redact_for_storage(params) if params is not None else None
+            redacted_raw_request = self._redact_for_storage(raw_request)
+        else:
+            redacted_params = None
+            redacted_raw_request = None
         principal = request_context.principal
         try:
             await self._store.log_request(
@@ -425,8 +445,14 @@ class Gateway:
         latency_ms: int,
         cache_hit: bool,
         response: Dict[str, Any],
+        upstream_id: Optional[str],
+        tool_name: Optional[str],
     ) -> None:
-        redacted_response = self._redact_for_storage(response)
+        redacted_response = (
+            self._redact_for_storage(response)
+            if self._body_capture_enabled(upstream_id, tool_name, is_response=True)
+            else None
+        )
         try:
             await self._store.log_response(
                 response_id=response_id,
@@ -533,7 +559,7 @@ class Gateway:
             return False
         if not tool_name:
             return False
-        return True
+        return tool_name in set(self._config.cache.allowed_tools)
 
     def _cache_key(
         self,
@@ -541,13 +567,23 @@ class Gateway:
         method: str,
         tool_name: str,
         params: Any,
-        client_id: Optional[str],
+        scope_key: Optional[str],
     ) -> str:
         normalized = normalize_params(params)
-        if tool_name in self._config.cache.client_scoped_tools:
-            scoped_client = client_id or "anonymous"
-            return f"{upstream.id}:{method}:{tool_name}:client={scoped_client}:{normalized}"
-        return f"{upstream.id}:{method}:{tool_name}:{normalized}"
+        if tool_name in self._config.cache.globally_shareable_tools:
+            return f"{upstream.id}:{method}:{tool_name}:{normalized}"
+        scoped_subject = scope_key or "anonymous"
+        return f"{upstream.id}:{method}:{tool_name}:scope={scoped_subject}:{normalized}"
+
+    def _cache_scope_key(self, request_context: RequestContext) -> str:
+        principal = request_context.principal
+        if principal is not None:
+            if principal.api_key_id:
+                return f"api_key:{principal.api_key_id}"
+            if principal.user_id:
+                return f"user:{principal.user_id}"
+            return f"subject:{principal.auth_scheme}:{principal.subject}"
+        return f"client:{request_context.client_id or 'anonymous'}"
 
     def _deny(self, upstream: UpstreamConfig, tool_name: Optional[str]) -> Optional[str]:
         if not tool_name:
@@ -611,7 +647,7 @@ class Gateway:
         payload: Dict[str, Any],
         method: str,
         params: Optional[Dict[str, Any]],
-        client_id: Optional[str],
+        request_context: RequestContext,
     ) -> RoutedRequest:
         requested_tool_name = self._get_tool_name(method, params)
         tool_name = requested_tool_name
@@ -633,7 +669,13 @@ class Gateway:
 
         cache_key: Optional[str] = None
         if upstream and self._is_cacheable(method, tool_name):
-            cache_key = self._cache_key(upstream, method, tool_name or "", params, client_id)
+            cache_key = self._cache_key(
+                upstream,
+                method,
+                tool_name or "",
+                params,
+                self._cache_scope_key(request_context),
+            )
 
         return RoutedRequest(
             payload=payload,
@@ -770,15 +812,32 @@ class Gateway:
                 {
                     "id": upstream.id,
                     "name": upstream.name,
-                    "tool_count": len(discovered),
-                    "exposed_tool_count": len(exposed),
-                    "exposed_tools": exposed,
+                    "available_tools": len(discovered),
+                    "exposed_tools": len(exposed),
+                    "exposed_tool_names": exposed,
                     "deny_tools": list(upstream.deny_tools),
                 }
             )
         return {
             "exposed_tool_registry_size": registry_size,
             "upstreams": upstreams_payload,
+        }
+
+    async def _cached_tools_list_response(self, request_id: Any) -> Dict[str, Any]:
+        async with self._registry_lock:
+            tools = [dict(tool) for tool in self._tool_payloads]
+        return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": tools}}
+
+    def _initialize_result_payload(self, request_id: Any, requested_protocol_version: Any) -> Dict[str, Any]:
+        negotiated_protocol_version = negotiate_protocol_version(requested_protocol_version)
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "protocolVersion": negotiated_protocol_version,
+                "capabilities": dict(self._server_capabilities),
+                "serverInfo": {"name": "mcp-gateway", "version": "1.0.0"},
+            },
         }
 
     def _is_global_breaker_open(self) -> bool:
@@ -988,6 +1047,8 @@ class Gateway:
                 latency_ms=latency_ms,
                 cache_hit=cache_hit,
                 response=store_payload if store_payload is not None else response_payload,
+                upstream_id=upstream_id,
+                tool_name=tool_name,
             )
 
         log_fields: Dict[str, Any] = {
@@ -1165,8 +1226,6 @@ class Gateway:
     async def _fanout_initialize(self, payload: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
         successful = 0
         merged_capabilities: Dict[str, Any] = {}
-        server_name = "mcp-gateway"
-        server_version = "1.0.0"
         params = payload.get("params")
         requested_protocol_version = params.get("protocolVersion") if isinstance(params, dict) else None
         negotiated_protocol_version = negotiate_protocol_version(requested_protocol_version)
@@ -1194,13 +1253,8 @@ class Gateway:
         success = successful > 0
         if not success:
             return make_error_response(payload.get("id"), -32003, "No upstream responded to initialize"), False
-
-        result_payload = {
-            "protocolVersion": negotiated_protocol_version,
-            "capabilities": merged_capabilities,
-            "serverInfo": {"name": server_name, "version": server_version},
-        }
-        return {"jsonrpc": "2.0", "id": payload.get("id"), "result": result_payload}, True
+        self._server_capabilities = merged_capabilities
+        return self._initialize_result_payload(payload.get("id"), negotiated_protocol_version), True
 
     async def _fanout_initialized_notification(self, payload: Dict[str, Any]) -> bool:
         executions = await self._fan_out_upstream_operations(
@@ -1251,6 +1305,8 @@ class Gateway:
         init_execution = await self._execute_upstream_operation(upstream, "initialize", init_payload)
         init_success = init_execution.success and isinstance(init_execution.payload.get("result"), dict)
         init_error = None if init_success else init_execution.error
+        init_result = init_execution.payload.get("result") if isinstance(init_execution.payload.get("result"), dict) else {}
+        init_capabilities = init_result.get("capabilities") if isinstance(init_result.get("capabilities"), dict) else {}
         await self._record_health(upstream.id, "initialize", init_success)
 
         if init_success:
@@ -1289,6 +1345,7 @@ class Gateway:
             upstream=upstream,
             initialize_success=init_success,
             initialize_error=init_error,
+            initialize_capabilities=init_capabilities,
             tools_list_success=tools_list_success,
             tools_list_error=tools_list_error,
             tool_names=tool_names,
@@ -1298,6 +1355,7 @@ class Gateway:
     async def warmup(self) -> None:
         # Prime upstream sessions and seed tool registry before client traffic.
         tool_payloads: list[tuple[UpstreamConfig, list[Dict[str, Any]]]] = []
+        merged_capabilities: Dict[str, Any] = {}
         results = await self._fan_out_upstream_operations(
             self._config.upstreams,
             self._warmup_single_upstream,
@@ -1305,6 +1363,8 @@ class Gateway:
         for upstream, result in results:
             if result.tool_payloads:
                 tool_payloads.append((upstream, result.tool_payloads))
+            if result.initialize_capabilities:
+                merged_capabilities = self._merge_dicts(merged_capabilities, result.initialize_capabilities)
 
             self._logger.info(
                 "upstream_warmup",
@@ -1329,6 +1389,7 @@ class Gateway:
         if registry_state.duplicates:
             raise RuntimeError(self._duplicate_tool_message(registry_state.duplicates))
         await self._apply_tool_registry_state(registry_state)
+        self._server_capabilities = merged_capabilities
 
     async def handle(self, payload: Dict[str, Any], request_context: RequestContext) -> GatewayResult:
         request_id = uuid4()
@@ -1371,7 +1432,12 @@ class Gateway:
                     cache_key=None,
                 )
                 timer = Timer()
-                response_payload, success = await self._fanout_initialize(payload)
+                if self.is_ready():
+                    requested_protocol_version = params.get("protocolVersion") if isinstance(params, dict) else None
+                    response_payload = self._initialize_result_payload(payload.get("id"), requested_protocol_version)
+                    success = True
+                else:
+                    response_payload, success = await self._fanout_initialize(payload)
                 return await self._finalize_request(
                     request_id=request_id,
                     method=method,
@@ -1410,7 +1476,7 @@ class Gateway:
                     tool_name=None,
                 )
 
-            routed = await self._route_request(payload, method, params, client_id)
+            routed = await self._route_request(payload, method, params, request_context)
             if not routed.upstream:
                 error_payload = make_error_response(payload.get("id"), -32000, "No upstream configured")
                 return await self._finalize_request(
@@ -1439,7 +1505,12 @@ class Gateway:
 
             if method in DISCOVERY_METHODS:
                 timer = Timer()
-                response_payload, success, upstream_errors = await self._aggregate_list(routed.payload, method)
+                if method == "tools/list" and self.is_ready():
+                    response_payload = await self._cached_tools_list_response(routed.payload.get("id"))
+                    success = True
+                    upstream_errors = []
+                else:
+                    response_payload, success, upstream_errors = await self._aggregate_list(routed.payload, method)
                 return await self._finalize_request(
                     request_id=request_id,
                     method=method,
