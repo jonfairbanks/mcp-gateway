@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from mcp_gateway import upstreams
-from mcp_gateway.protocol import CURRENT_PROTOCOL_VERSION
+from mcp_gateway.protocol import CURRENT_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION
 
 FIXTURE_STDIO_UPSTREAM = Path(__file__).resolve().parent / "fixtures" / "fake_stdio_upstream.py"
 
@@ -121,7 +121,7 @@ def test_http_upstream_call_parses_sse_response_and_ignores_notifications() -> N
     assert client._session_id == "session-123"
 
 
-def test_http_upstream_ignores_unsupported_protocol_version_from_initialize_result() -> None:
+def test_http_upstream_accepts_supported_protocol_version_from_initialize_result() -> None:
     client = upstreams.StreamableHTTPUpstream("https://example.com/mcp", 1000)
     client._session = FakeClientSession(
         [
@@ -132,7 +132,7 @@ def test_http_upstream_ignores_unsupported_protocol_version_from_initialize_resu
                         "jsonrpc": "2.0",
                         "id": "req-1",
                         "result": {
-                            "protocolVersion": "2025-03-26",
+                            "protocolVersion": LEGACY_PROTOCOL_VERSION,
                             "capabilities": {"tools": {}},
                         },
                     }
@@ -153,7 +153,7 @@ def test_http_upstream_ignores_unsupported_protocol_version_from_initialize_resu
     )
 
     assert response.success is True
-    assert client._protocol_version == CURRENT_PROTOCOL_VERSION
+    assert client._protocol_version == LEGACY_PROTOCOL_VERSION
 
 
 def test_http_upstream_call_errors_when_sse_body_has_no_matching_response() -> None:

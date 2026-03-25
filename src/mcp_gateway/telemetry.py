@@ -18,10 +18,11 @@ _CONFIGURED_TRACER_PROVIDER: Optional[TracerProvider] = None
 
 
 class GatewayTelemetry:
-    def __init__(self, tracer_provider: Optional[TracerProvider] = None) -> None:
+    def __init__(self, tracer_provider: Optional[TracerProvider] = None, *, enabled: bool = False) -> None:
         self._prom_registry = CollectorRegistry()
         self._owns_tracer_provider = False
         self._tracer_provider = tracer_provider
+        self._enabled = enabled
         self._prom_requests_total = Counter(
             "mcp_gateway_requests_total",
             "Total MCP requests received by method.",
@@ -65,6 +66,8 @@ class GatewayTelemetry:
         global _CONFIGURED_TRACER_PROVIDER
 
         if self._tracer_provider is not None:
+            return
+        if not self._enabled:
             return
 
         exporter = self._resolve_trace_exporter()

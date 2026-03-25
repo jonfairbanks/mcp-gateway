@@ -22,6 +22,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
+      MCP_GATEWAY_API_KEY: change-me
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/mcp_gateway
     ports:
       - "8080:8080"

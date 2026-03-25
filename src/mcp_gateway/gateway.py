@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from uuid import UUID, uuid4
@@ -17,6 +16,7 @@ from .postgres import PostgresStore
 from .protocol import CURRENT_PROTOCOL_VERSION, negotiate_protocol_version
 from .request_context import AuthenticatedPrincipal, RequestContext
 from .router import build_routes, select_upstream
+from .runtime_state import GatewayRuntimeState
 from .telemetry import GatewayTelemetry
 from .upstreams import StdioUpstream, StreamableHTTPUpstream, UpstreamResponse
 
@@ -106,16 +106,35 @@ class Gateway:
         self._upstream_tools: Dict[str, list[str]] = {u.id: [] for u in config.upstreams}
         self._registry_lock = asyncio.Lock()
         self._upstream_by_id: Dict[str, UpstreamConfig] = {u.id: u for u in config.upstreams}
-        self._health_counters: Dict[str, Dict[str, Dict[str, int]]] = {}
-        self._health_lock = asyncio.Lock()
-        self._breaker_lock = asyncio.Lock()
-        self._upstream_breakers: Dict[str, Dict[str, float]] = {}
-        self._global_breaker: Dict[str, float] = {"consecutive_failures": 0, "open_until": 0.0}
-        self._warmup_status: Dict[str, Dict[str, Any]] = {}
+        self._runtime = GatewayRuntimeState(config, self._upstream_by_id)
         self._server_capabilities: Dict[str, Any] = {}
         self._redact_fields = BUILTIN_REDACT_FIELDS | {
             field.strip().lower() for field in config.logging.extra_redact_fields if field.strip()
         }
+
+    @property
+    def _warmup_status(self) -> Dict[str, Dict[str, Any]]:
+        return self._runtime.warmup_status
+
+    @_warmup_status.setter
+    def _warmup_status(self, value: Dict[str, Dict[str, Any]]) -> None:
+        self._runtime.warmup_status = value
+
+    @property
+    def _upstream_breakers(self) -> Dict[str, Dict[str, float]]:
+        return self._runtime.upstream_breakers
+
+    @_upstream_breakers.setter
+    def _upstream_breakers(self, value: Dict[str, Dict[str, float]]) -> None:
+        self._runtime.upstream_breakers = value
+
+    @property
+    def _global_breaker(self) -> Dict[str, float]:
+        return self._runtime.global_breaker
+
+    @_global_breaker.setter
+    def _global_breaker(self, value: Dict[str, float]) -> None:
+        self._runtime.global_breaker = value
 
     async def close(self) -> None:
         await self._auth.close()
@@ -516,35 +535,7 @@ class Gateway:
             )
 
     async def _record_health(self, upstream_id: str, method: str, success: bool) -> None:
-        async with self._breaker_lock:
-            upstream_cfg = self._upstream_by_id.get(upstream_id)
-            upstream_state = self._upstream_breakers.setdefault(upstream_id, {"consecutive_failures": 0, "open_until": 0.0})
-            if success:
-                upstream_state["consecutive_failures"] = 0
-                self._global_breaker["consecutive_failures"] = 0
-            else:
-                upstream_state["consecutive_failures"] += 1
-                self._global_breaker["consecutive_failures"] += 1
-                upstream_threshold = int(
-                    upstream_cfg.circuit_breaker_fail_threshold
-                    if upstream_cfg and upstream_cfg.circuit_breaker_fail_threshold is not None
-                    else self._config.gateway.circuit_breaker_fail_threshold
-                )
-                upstream_open_seconds = int(
-                    upstream_cfg.circuit_breaker_open_seconds
-                    if upstream_cfg and upstream_cfg.circuit_breaker_open_seconds is not None
-                    else self._config.gateway.circuit_breaker_open_seconds
-                )
-                if int(upstream_state["consecutive_failures"]) >= max(1, upstream_threshold):
-                    upstream_state["open_until"] = time.monotonic() + max(1, upstream_open_seconds)
-                if int(self._global_breaker["consecutive_failures"]) >= max(1, self._config.gateway.circuit_breaker_fail_threshold):
-                    self._global_breaker["open_until"] = (
-                        time.monotonic() + max(1, self._config.gateway.circuit_breaker_open_seconds)
-                    )
-        async with self._health_lock:
-            upstream_entry = self._health_counters.setdefault(upstream_id, {})
-            method_entry = upstream_entry.setdefault(method, {"success": 0, "fail": 0})
-            method_entry["success" if success else "fail"] += 1
+        await self._runtime.record_health(upstream_id, method, success)
         self._telemetry.record_upstream_outcome(upstream_id, method, success)
 
     def _get_tool_name(self, method: str, params: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -714,100 +705,25 @@ class Gateway:
         return out
 
     def status_snapshot(self) -> Dict[str, Any]:
-        now = time.monotonic()
-        upstream_breakers = {}
-        for upstream_id, state in self._upstream_breakers.items():
-            upstream_breakers[upstream_id] = {
-                "consecutive_failures": int(state.get("consecutive_failures", 0)),
-                "open": now < float(state.get("open_until", 0.0)),
-                "open_seconds_remaining": max(0, int(float(state.get("open_until", 0.0)) - now)),
-            }
-        return {
-            "warmup": self._warmup_status,
-            "global_breaker": {
-                "consecutive_failures": int(self._global_breaker.get("consecutive_failures", 0)),
-                "open": now < float(self._global_breaker.get("open_until", 0.0)),
-                "open_seconds_remaining": max(0, int(float(self._global_breaker.get("open_until", 0.0)) - now)),
-            },
-            "upstream_breakers": upstream_breakers,
-        }
-
-    def _startup_failure_details(self, status: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
-        if not status.get("initialize_success"):
-            return "initialize", self._error_message(status.get("initialize_error"))
-        if not status.get("tools_list_success"):
-            return "tools/list", self._error_message(status.get("tools_list_error"))
-        return None, None
-
-    def _error_message(self, error: Any) -> Optional[str]:
-        if isinstance(error, dict):
-            message = error.get("message")
-            data = error.get("data")
-            if isinstance(data, str) and data.strip():
-                if isinstance(message, str) and message.strip() and data.strip() != message.strip():
-                    return f"{message}: {data}"
-                return data.strip()
-            if isinstance(message, str) and message.strip():
-                return message.strip()
-            return None
-        if isinstance(error, str) and error.strip():
-            return error.strip()
-        return None
+        return self._runtime.status_snapshot()
 
     def startup_summary(self) -> Dict[str, Any]:
-        upstreams: list[Dict[str, Any]] = []
-        ready_upstream_count = 0
-        degraded_upstream_count = 0
-        failed_upstream_count = 0
-
-        for upstream in self._config.upstreams:
-            status = self._warmup_status.get(upstream.id, {})
-            initialize_success = bool(status.get("initialize_success"))
-            tools_list_success = bool(status.get("tools_list_success"))
-            if initialize_success and tools_list_success:
-                lifecycle_status = "ready"
-                ready_upstream_count += 1
-            elif initialize_success or tools_list_success:
-                lifecycle_status = "degraded"
-                degraded_upstream_count += 1
-            else:
-                lifecycle_status = "failed"
-                failed_upstream_count += 1
-
-            entry: Dict[str, Any] = {
-                "id": upstream.id,
-                "status": lifecycle_status,
-                "tool_count": int(status.get("tool_count", 0)),
-            }
-            stage, reason = self._startup_failure_details(status)
-            if stage:
-                entry["stage"] = stage
-            if reason:
-                entry["reason"] = reason
-            upstreams.append(entry)
-
-        return {
-            "gateway_ready": self.is_ready(),
-            "ready_upstream_count": ready_upstream_count,
-            "degraded_upstream_count": degraded_upstream_count,
-            "failed_upstream_count": failed_upstream_count,
-            "upstreams": upstreams,
-        }
+        return self._runtime.startup_summary()
 
     def is_ready(self) -> bool:
-        return any(
-            status.get("initialize_success") and status.get("tools_list_success")
-            for status in self._warmup_status.values()
-        )
+        return self._runtime.is_ready()
 
     async def tools_catalog(self) -> Dict[str, Any]:
         async with self._registry_lock:
             upstream_tools = {k: list(v) for k, v in self._upstream_tools.items()}
-            registry_size = len(self._tool_registry)
         upstreams_payload = []
+        total_available_tools = 0
+        total_exposed_tools = 0
         for upstream in self._config.upstreams:
             discovered = upstream_tools.get(upstream.id, [])
             exposed = [tool for tool in discovered if tool not in upstream.deny_tools]
+            total_available_tools += len(discovered)
+            total_exposed_tools += len(exposed)
             upstreams_payload.append(
                 {
                     "id": upstream.id,
@@ -819,7 +735,8 @@ class Gateway:
                 }
             )
         return {
-            "exposed_tool_registry_size": registry_size,
+            "total_available_tools": total_available_tools,
+            "total_exposed_tools": total_exposed_tools,
             "upstreams": upstreams_payload,
         }
 
@@ -841,13 +758,10 @@ class Gateway:
         }
 
     def _is_global_breaker_open(self) -> bool:
-        return time.monotonic() < float(self._global_breaker.get("open_until", 0.0))
+        return self._runtime.is_global_breaker_open()
 
     def _is_upstream_breaker_open(self, upstream_id: str) -> bool:
-        state = self._upstream_breakers.get(upstream_id)
-        if not state:
-            return False
-        return time.monotonic() < float(state.get("open_until", 0.0))
+        return self._runtime.is_upstream_breaker_open(upstream_id)
 
     async def _call_upstream(self, upstream: UpstreamConfig, payload: Dict[str, Any]) -> UpstreamResponse:
         if self._is_global_breaker_open():

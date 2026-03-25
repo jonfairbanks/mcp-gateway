@@ -20,10 +20,12 @@ from mcp_gateway.telemetry import GatewayTelemetry
 FIXTURE_STDIO_UPSTREAM = Path(__file__).resolve().parent / "fixtures" / "fake_stdio_upstream.py"
 SCHEMA_SQL = Path(__file__).resolve().parents[1] / "schema.sql"
 TEST_DATABASE_DSN_ENV = "MCP_GATEWAY_TEST_DATABASE_URL"
+DEFAULT_DATABASE_DSN_ENV = "DATABASE_URL"
+TEST_DATABASE_DSN = os.getenv(TEST_DATABASE_DSN_ENV) or os.getenv(DEFAULT_DATABASE_DSN_ENV)
 
 pytestmark = pytest.mark.skipif(
-    not os.getenv(TEST_DATABASE_DSN_ENV),
-    reason=f"set {TEST_DATABASE_DSN_ENV} to run Postgres integration tests",
+    not TEST_DATABASE_DSN,
+    reason=f"set {TEST_DATABASE_DSN_ENV} or {DEFAULT_DATABASE_DSN_ENV} to run Postgres integration tests",
 )
 
 
@@ -212,7 +214,8 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging()
         http_app.router.add_post("/mcp", upstream_handler)
 
         async with TestServer(http_app) as upstream_server:
-            store = PostgresStore(os.environ[TEST_DATABASE_DSN_ENV])
+            assert TEST_DATABASE_DSN is not None
+            store = PostgresStore(TEST_DATABASE_DSN)
             await store.start()
             await _prepare_database(store)
 
@@ -357,7 +360,8 @@ def test_rate_limits_apply_across_two_gateway_instances_with_shared_postgres() -
         http_app.router.add_post("/mcp", upstream_handler)
 
         async with TestServer(http_app) as upstream_server:
-            dsn = os.environ[TEST_DATABASE_DSN_ENV]
+            assert TEST_DATABASE_DSN is not None
+            dsn = TEST_DATABASE_DSN
             store_a = PostgresStore(dsn)
             store_b = PostgresStore(dsn)
             await store_a.start()
@@ -459,7 +463,8 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> N
         http_app.router.add_post("/mcp", upstream_handler)
 
         async with TestServer(http_app) as upstream_server:
-            dsn = os.environ[TEST_DATABASE_DSN_ENV]
+            assert TEST_DATABASE_DSN is not None
+            dsn = TEST_DATABASE_DSN
             store_a = PostgresStore(dsn)
             store_b = PostgresStore(dsn)
             await store_a.start()

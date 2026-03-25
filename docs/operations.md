@@ -3,8 +3,14 @@
 ## Health and Readiness
 
 - `GET /healthz` confirms the process is alive
-- `GET /readyz` returns `503` until at least one upstream has passed both `initialize` and `tools/list`
+- `GET /readyz` returns `503` until the configured readiness policy is satisfied
 - both endpoints return minimal public payloads only
+
+Readiness policies:
+
+- `any` marks the gateway ready when at least one upstream has passed both `initialize` and `tools/list`
+- `required` marks the gateway ready only when every upstream listed in `gateway.required_ready_upstreams` is healthy
+- `threshold` marks the gateway ready when the configured healthy-count and/or healthy-percent threshold is met
 
 ## Metrics
 
@@ -28,7 +34,7 @@ sum by (upstream_id) (
 
 ## Tracing
 
-Tracing is off by default. The gateway emits OpenTelemetry spans when standard OTEL exporter environment variables are present.
+Tracing is off by default. The gateway only emits OpenTelemetry spans when `gateway.tracing_enabled: true` and standard OTEL exporter environment variables are present.
 
 Common setup:
 
@@ -56,12 +62,12 @@ Structured logs include upstream and tool-level detail. If an upstream fails war
 - `gateway.allow_unauthenticated: true` should be treated as an intentional public exposure decision
 - `gateway.public_tools_catalog: true` only makes the catalog public; it does not make `tools/call` public
 - `gateway.public_metrics: true` should be treated as an explicit observability exposure decision
-- the gateway only supports MCP protocol version `2025-11-25`
+- the gateway currently supports MCP protocol versions `2025-03-26` and `2025-11-25`
 
 ## Troubleshooting
 
 - If tools are missing, check `upstream_warmup` and `tools/list` logs.
-- If `readyz` stays unhealthy, at least one upstream has not completed both `initialize` and `tools/list`.
+- If `readyz` stays unhealthy, check the configured readiness policy and the warmup status of the upstreams that policy depends on.
 - If a tool call is blocked, look for JSON-RPC `-32001` with `error.data.category = policy_denied`.
 - If auth fails, verify the bearer token and `gateway.auth_mode`.
 - If a `stdio` upstream fails on startup, verify the CLI exists on the host and the `env` block is a YAML mapping, not a list.

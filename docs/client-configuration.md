@@ -28,6 +28,6 @@ http_headers = { "Authorization" = "Bearer change-me" }
 ## Client Expectations
 
 - the gateway exposes MCP over `POST /mcp`
-- the gateway currently supports MCP protocol version `2025-11-25` only
+- the gateway currently supports MCP protocol versions `2025-03-26` and `2025-11-25`
 - discovery requests are aggregated across upstreams
 - `tools/call` is routed to the upstream that owns the tool

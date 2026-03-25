@@ -9,7 +9,7 @@ Authorization is handled by PyCasbin using groups, integration grants, and platf
 
 The high-level rules are:
 
-- `admin` users keep full built-in MCP and admin access.
+- `admin` users keep full built-in MCP access and full CLI operator access.
 - standard users authenticate successfully, but do not get built-in integration or admin access.
 - Non-admin access comes from group memberships and grants stored in Postgres.
 - Tool discovery remains unfiltered. A user can still see tools in `GET /tools` or `tools/list`.
@@ -59,7 +59,7 @@ If a group has an integration grant for `jira`, members of that group can call t
 
 ### Platform grants
 
-Platform grants control access to management APIs.
+Platform grants control delegated operator capabilities.
 
 Supported platform permissions are:
 
@@ -88,56 +88,56 @@ Use this order on a fresh deployment:
 This is the simplest mental model:
 
 - auth answers "who is this caller?"
-- RBAC answers "which integrations and admin APIs can they use?"
+- RBAC answers "which integrations and delegated operator capabilities can they use?"
 
 ## Example: Sales Can Only Use Jira
 
 Assume:
 
-- gateway base URL is `http://localhost:8080`
-- you already have an admin token in `ADMIN_TOKEN`
+- your config path is `./config.yaml`
+- the gateway is running in `postgres_api_keys` mode
 
 List valid integration ids:
 
 ```bash
-curl -H "Authorization: Bearer $ADMIN_TOKEN" \
-  http://localhost:8080/v1/admin/integrations
+mcp-gateway list-integrations --config ./config.yaml
 ```
 
 Create the `sales` group:
 
 ```bash
-curl -X POST http://localhost:8080/v1/admin/groups \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"sales","description":"Sales team"}'
+mcp-gateway create-group \
+  --config ./config.yaml \
+  --name sales \
+  --description "Sales team"
 ```
 
 Create a non-admin user and issue their first API key:
 
 ```bash
-curl -X POST http://localhost:8080/v1/admin/users \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"subject":"alice","display_name":"Alice","issue_api_key":true,"key_label":"default"}'
+mcp-gateway create-user \
+  --config ./config.yaml \
+  --subject alice \
+  --display-name Alice \
+  --issue-api-key
 ```
 
 Add the user to the group:
 
 ```bash
-curl -X POST http://localhost:8080/v1/admin/groups/$GROUP_ID/members \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"subject":"alice"}'
+mcp-gateway add-group-member \
+  --config ./config.yaml \
+  --group-id "$GROUP_ID" \
+  --subject alice
 ```
 
 Grant Jira to the group:
 
 ```bash
-curl -X POST http://localhost:8080/v1/admin/groups/$GROUP_ID/integration-grants \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"upstream_id":"jira"}'
+mcp-gateway grant-integration \
+  --config ./config.yaml \
+  --group-id "$GROUP_ID" \
+  --upstream-id jira
 ```
 
 Now `alice` should:
@@ -171,17 +171,17 @@ If you want a non-admin group to manage parts of the gateway, add platform grant
 
 Examples:
 
-- `admin.groups.read` lets a group list groups and grants
-- `admin.groups.write` lets a group create, update, and delete groups and grants
+- `admin.groups.read` lets a group inspect RBAC state
+- `admin.groups.write` lets a group manage groups and grants through operator workflows
 - `admin.usage.read` lets a group query usage summaries
 
-Example request:
+Example command:
 
 ```bash
-curl -X POST http://localhost:8080/v1/admin/groups/$GROUP_ID/platform-grants \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"permission":"admin.usage.read"}'
+mcp-gateway grant-platform \
+  --config ./config.yaml \
+  --group-id "$GROUP_ID" \
+  --permission admin.usage.read
 ```
 
 ## Testing
@@ -226,30 +226,10 @@ If the tool is not allowed, the gateway returns a JSON-RPC error with:
 - Integration grants use upstream ids, not tool names.
 - `GET /tools` and `tools/list` are not an authorization test; `tools/call` is.
 - `deny_tools` in upstream config can still block specific tools even when the group has the upstream grant.
-- If `/v1/admin/groups` is empty after applying the schema, that is normal. No groups are seeded automatically.
+- If you have not created any groups yet, that is normal. No groups are seeded automatically.
 - upstream ids in grants must match the configured `upstreams[].id` values exactly.
-
-## Postman
-
-The repo includes a ready-to-import Postman collection:
-
-- [`docs/postman/mcp-gateway.postman_collection.json`](docs/postman/mcp-gateway.postman_collection.json)
-
-Set:
-
-- `base_url`
-- `admin_token`
-
-The collection can then auto-populate:
-
-- `group_id`
-- `user_id`
-- `subject`
-- `key_id`
-- `user_token`
 
 ## Related Files
 
 - Configuration reference: [`docs/configuration.md`](configuration.md)
-- Postman collection: [`docs/postman/mcp-gateway.postman_collection.json`](postman/mcp-gateway.postman_collection.json)
 - Database schema: [`schema.sql`](../schema.sql)
