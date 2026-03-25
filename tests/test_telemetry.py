@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -47,6 +49,23 @@ def test_tracing_stays_disabled_without_otel_env(monkeypatch) -> None:
     telemetry = GatewayTelemetry()
 
     assert telemetry.tracing_enabled is False
+
+
+def test_tracing_stays_disabled_when_otel_env_exists_but_gateway_tracing_is_not_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "console")
+
+    telemetry = GatewayTelemetry()
+
+    assert telemetry.tracing_enabled is False
+
+
+def test_tracing_enables_only_when_gateway_flag_is_set(monkeypatch) -> None:
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "console")
+
+    telemetry = GatewayTelemetry(enabled=True)
+
+    assert telemetry.tracing_enabled is True
+    asyncio.run(telemetry.close())
 
 
 def test_inject_context_adds_traceparent_for_active_span() -> None:

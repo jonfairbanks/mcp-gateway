@@ -107,9 +107,21 @@ def test_load_environment_calls_python_dotenv(monkeypatch) -> None:
     monkeypatch.setattr(cli, "load_dotenv", fake_load_dotenv)
     monkeypatch.setattr(cli.Path, "cwd", lambda: Path("/tmp/test-cwd"))
 
-    cli._load_environment()
+    loaded_path = cli._load_environment()
 
     assert called_with == Path("/tmp/test-cwd/.env")
+    assert loaded_path is None
+
+
+def test_load_environment_returns_dotenv_path_when_present(monkeypatch, tmp_path) -> None:
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text("MCP_GATEWAY_API_KEY=secret\n", encoding="utf-8")
+
+    monkeypatch.setattr(cli.Path, "cwd", lambda: tmp_path)
+
+    loaded_path = cli._load_environment()
+
+    assert loaded_path == dotenv_path
 
 
 def test_run_create_api_key_reports_auth_mode_misconfiguration(monkeypatch, capsys) -> None:
@@ -133,6 +145,42 @@ def test_run_create_api_key_reports_auth_mode_misconfiguration(monkeypatch, caps
     captured = capsys.readouterr()
     assert "ERROR: gateway.auth_mode must be postgres_api_keys" in captured.err
     assert "hint: Set gateway.auth_mode to postgres_api_keys before issuing database-backed API keys" in captured.err
+
+
+def test_run_validate_config_reports_success(monkeypatch, capsys) -> None:
+    config = SimpleNamespace(upstreams=[object()], gateway=SimpleNamespace(auth_mode="single_shared"))
+    monkeypatch.setattr(cli, "load_config", lambda _path: config)
+    monkeypatch.setattr(cli, "_load_environment", lambda: None)
+
+    cli._run_validate_config("config.yaml")
+
+    captured = capsys.readouterr()
+    assert "INFO config_valid" in captured.out
+    assert "config_path=\"config.yaml\"" in captured.out
+
+
+def test_build_parser_supports_operator_commands() -> None:
+    parser = cli.build_parser()
+
+    for command in (
+        "validate-config",
+        "warmup-check",
+        "list-integrations",
+        "create-user",
+        "create-group",
+        "add-group-member",
+        "grant-integration",
+        "grant-platform",
+    ):
+        args = parser.parse_args([command, "--config", "config.yaml"] + (
+            ["--subject", "alice"] if command == "create-user" else
+            ["--name", "ops"] if command == "create-group" else
+            ["--group-id", "g-1", "--subject", "alice"] if command == "add-group-member" else
+            ["--group-id", "g-1", "--upstream-id", "github"] if command == "grant-integration" else
+            ["--group-id", "g-1", "--permission", "admin.usage.read"] if command == "grant-platform" else
+            []
+        ))
+        assert args.command == command
 
 
 def test_cache_cleanup_loop_runs_and_stops_cleanly(monkeypatch) -> None:

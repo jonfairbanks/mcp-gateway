@@ -9,126 +9,17 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from mcp_gateway.config import AppConfig, CacheConfig, GatewayConfig, LoggingConfig, UpstreamConfig
 from mcp_gateway.errors import ConflictError, NotFoundError
 from mcp_gateway.gateway import Gateway, GatewayResult, UpstreamExecution
 from mcp_gateway.logging import Logger
 from mcp_gateway.postgres import PostgresStore
-from mcp_gateway.protocol import CURRENT_PROTOCOL_VERSION
+from mcp_gateway.protocol import CURRENT_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION
 from mcp_gateway.request_context import AuthenticatedPrincipal, RequestContext
 from mcp_gateway.router import build_routes, select_upstream
 from mcp_gateway.server_http import HttpServer
 from mcp_gateway.telemetry import GatewayTelemetry
 from mcp_gateway.upstreams import UpstreamResponse
-
-
-def _upstream(
-    upstream_id: str = "notion",
-    *,
-    deny_tools: list[str] | None = None,
-    tool_routes: list[str] | None = None,
-) -> UpstreamConfig:
-    return UpstreamConfig(
-        id=upstream_id,
-        name=upstream_id,
-        transport="streamable_http",
-        endpoint="http://example.com/rpc",
-        http_headers={},
-        bearer_token_env_var=None,
-        http_serialize_requests=False,
-        command=None,
-        env={},
-        cwd=None,
-        timeout_ms=1000,
-        stdio_read_limit_bytes=1024 * 1024,
-        max_in_flight=10,
-        deny_tools=deny_tools or [],
-        cache_ttl_minutes=None,
-        circuit_breaker_fail_threshold=None,
-        circuit_breaker_open_seconds=None,
-        tool_routes=tool_routes or [],
-    )
-
-
-def _config_with_upstreams(upstreams: list[UpstreamConfig]) -> AppConfig:
-    return AppConfig(
-        gateway=GatewayConfig(
-            listen_host="0.0.0.0",
-            listen_port=8080,
-            auth_mode="single_shared",
-            api_key="secret",
-            bootstrap_admin_api_key="",
-            allow_unauthenticated=False,
-            public_tools_catalog=False,
-            trusted_proxies=["127.0.0.1", "::1"],
-            request_max_bytes=2 * 1024 * 1024,
-            rate_limit_per_minute=120,
-            circuit_breaker_fail_threshold=10,
-            circuit_breaker_open_seconds=30,
-        ),
-        logging=LoggingConfig(stdout_json=False, extra_redact_fields=[]),
-        cache=CacheConfig(enabled=True, max_entries=100, default_ttl_minutes=60),
-        upstreams=upstreams,
-    )
-
-
-def _request(
-    *,
-    headers: dict | None = None,
-    remote: str = "127.0.0.1",
-    body=None,
-    query: dict | None = None,
-    match_info: dict | None = None,
-):
-    async def json_loader():
-        if isinstance(body, Exception):
-            raise body
-        return body
-
-    return SimpleNamespace(
-        headers=headers or {},
-        remote=remote,
-        json=json_loader,
-        query=query or {},
-        match_info=match_info or {},
-    )
-
-
-class RecordingStore:
-    def __init__(self) -> None:
-        self.request_args = None
-        self.response_args = None
-
-    async def log_request(self, **kwargs) -> None:
-        self.request_args = kwargs
-
-    async def log_response(self, **kwargs) -> None:
-        self.response_args = kwargs
-
-    async def log_denial(self, *args, **kwargs) -> None:
-        return None
-
-    async def cache_get(self, cache_key: str):
-        return None
-
-    async def cache_set(self, cache_key: str, response, ttl_seconds: int) -> None:
-        return None
-
-
-class RecordingLogger:
-    def __init__(self) -> None:
-        self.warnings: list[tuple[str, dict]] = []
-        self.errors: list[tuple[str, dict]] = []
-        self.infos: list[tuple[str, dict]] = []
-
-    def warn(self, event: str, **fields) -> None:
-        self.warnings.append((event, fields))
-
-    def error(self, event: str, **fields) -> None:
-        self.errors.append((event, fields))
-
-    def info(self, event: str, **fields) -> None:
-        self.infos.append((event, fields))
+from tests.gateway_test_support import RecordingLogger, RecordingStore, _config_with_upstreams, _request, _upstream
 
 
 def test_denylist_matches_tool_name() -> None:
@@ -313,7 +204,8 @@ def test_tools_catalog_uses_clear_count_names() -> None:
 
     payload = asyncio.run(gateway.tools_catalog())
 
-    assert payload["exposed_tool_registry_size"] == 1
+    assert payload["total_available_tools"] == 2
+    assert payload["total_exposed_tools"] == 1
     assert payload["upstreams"] == [
         {
             "id": "notion",
@@ -966,6 +858,39 @@ def test_fanout_initialize_negotiates_latest_supported_version_for_unknown_clien
     assert seen_versions == [CURRENT_PROTOCOL_VERSION]
 
 
+def test_fanout_initialize_preserves_supported_legacy_client_version() -> None:
+    config = _config_with_upstreams([_upstream("one")])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    seen_versions: list[str] = []
+
+    async def fake_execute(upstream, method, payload, *, notification=False):
+        assert method == "initialize"
+        seen_versions.append(payload["params"]["protocolVersion"])
+        return UpstreamExecution(
+            success=True,
+            payload={"jsonrpc": "2.0", "id": payload.get("id"), "result": {"capabilities": {}}},
+            log_payload={"ok": True},
+            error=None,
+        )
+
+    gateway._execute_upstream_operation = fake_execute  # type: ignore[method-assign]
+
+    response_payload, success = asyncio.run(
+        gateway._fanout_initialize(
+            {
+                "jsonrpc": "2.0",
+                "id": "init-1",
+                "method": "initialize",
+                "params": {"protocolVersion": LEGACY_PROTOCOL_VERSION},
+            }
+        )
+    )
+
+    assert success is True
+    assert response_payload["result"]["protocolVersion"] == LEGACY_PROTOCOL_VERSION
+    assert seen_versions == [LEGACY_PROTOCOL_VERSION]
+
+
 def test_initialize_uses_warmed_capabilities_without_live_upstream_fanout() -> None:
     config = _config_with_upstreams([_upstream("one")])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
@@ -1103,6 +1028,60 @@ def test_gateway_is_not_ready_when_initialize_succeeds_but_tools_list_fails() ->
     assert gateway.is_ready() is False
 
 
+def test_gateway_required_readiness_mode_requires_named_upstreams() -> None:
+    config = _config_with_upstreams([_upstream("github"), _upstream("notion")])
+    config.gateway.readiness_mode = "required"
+    config.gateway.required_ready_upstreams = ["github", "notion"]
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    gateway._warmup_status = {
+        "github": {"initialize_success": True, "tools_list_success": True},
+        "notion": {"initialize_success": False, "tools_list_success": False},
+    }
+
+    assert gateway.is_ready() is False
+
+    gateway._warmup_status["notion"] = {"initialize_success": True, "tools_list_success": True}
+
+    assert gateway.is_ready() is True
+
+
+def test_gateway_threshold_readiness_mode_supports_minimum_healthy_upstreams() -> None:
+    config = _config_with_upstreams([_upstream("a"), _upstream("b"), _upstream("c")])
+    config.gateway.readiness_mode = "threshold"
+    config.gateway.readiness_min_healthy_upstreams = 2
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    gateway._warmup_status = {
+        "a": {"initialize_success": True, "tools_list_success": True},
+        "b": {"initialize_success": False, "tools_list_success": False},
+        "c": {"initialize_success": True, "tools_list_success": True},
+    }
+
+    assert gateway.is_ready() is True
+
+    gateway._warmup_status["c"] = {"initialize_success": False, "tools_list_success": False}
+
+    assert gateway.is_ready() is False
+
+
+def test_gateway_threshold_readiness_mode_supports_percent_threshold() -> None:
+    config = _config_with_upstreams([_upstream("a"), _upstream("b"), _upstream("c"), _upstream("d")])
+    config.gateway.readiness_mode = "threshold"
+    config.gateway.readiness_min_healthy_percent = 50
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    gateway._warmup_status = {
+        "a": {"initialize_success": True, "tools_list_success": True},
+        "b": {"initialize_success": True, "tools_list_success": True},
+        "c": {"initialize_success": False, "tools_list_success": False},
+        "d": {"initialize_success": False, "tools_list_success": False},
+    }
+
+    assert gateway.is_ready() is True
+
+    gateway._warmup_status["b"] = {"initialize_success": False, "tools_list_success": False}
+
+    assert gateway.is_ready() is False
+
+
 def test_preflight_request_rejects_unauthorized_requests() -> None:
     config = _config_with_upstreams([_upstream()])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
@@ -1115,6 +1094,21 @@ def test_preflight_request_rejects_unauthorized_requests() -> None:
     assert request_context is None
     assert response is not None
     assert response.status == 401
+
+
+def test_build_app_exposes_only_runtime_and_self_service_routes() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    app = server.build_app()
+    route_paths = {route.resource.canonical for route in app.router.routes()}
+
+    assert "/v1/me" in route_paths
+    assert "/v1/me/api-keys" in route_paths
+    assert "/mcp" in route_paths
+    assert "/v1/admin/users" not in route_paths
+    assert "/v1/admin/groups" not in route_paths
 
 
 def test_execution_endpoints_still_require_auth_when_tools_catalog_is_public() -> None:
@@ -1225,350 +1219,6 @@ def test_standard_user_cannot_call_tools_without_grants() -> None:
 
     assert result.success is False
     assert result.payload["error"]["data"]["category"] == "policy_denied"
-
-
-def test_admin_users_create_requires_admin_role() -> None:
-    config = _config_with_upstreams([_upstream()])
-    config.gateway.auth_mode = "postgres_api_keys"
-    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
-    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
-
-    async def fake_authenticate_token(token):
-        return AuthenticatedPrincipal(
-            subject="alice",
-            auth_scheme="postgres_api_key",
-            user_id="user-1",
-            api_key_id="key-1",
-        )
-
-    gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
-
-    response = asyncio.run(
-        server.admin_users_create_handler(
-            _request(
-                headers={"Authorization": "Bearer user-key"},
-                body={"subject": "bob", "display_name": "Bob"},
-            )
-        )
-    )
-
-    assert response.status == 403
-
-
-def test_admin_users_create_returns_conflict_for_existing_subject() -> None:
-    config = _config_with_upstreams([_upstream()])
-    config.gateway.auth_mode = "postgres_api_keys"
-    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
-    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
-
-    async def fake_authenticate_token(token):
-        return AuthenticatedPrincipal(
-            subject="jonfairbanks",
-            auth_scheme="postgres_api_key",
-            role="admin",
-            user_id="user-1",
-            api_key_id="key-1",
-        )
-
-    async def fake_create_user(*, subject: str, display_name: str | None, role: str | None):
-        assert subject == "jonfairbanks"
-        return None
-
-    gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
-    gateway.create_user = fake_create_user  # type: ignore[method-assign]
-
-    response = asyncio.run(
-        server.admin_users_create_handler(
-            _request(
-                headers={"Authorization": "Bearer admin-key"},
-                body={"subject": "jonfairbanks", "display_name": "Jon", "role": "admin"},
-            )
-        )
-    )
-
-    assert response.status == 409
-
-
-def test_admin_users_create_normalizes_admin_role_before_call() -> None:
-    config = _config_with_upstreams([_upstream()])
-    config.gateway.auth_mode = "postgres_api_keys"
-    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
-    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
-
-    async def fake_authenticate_token(token):
-        return AuthenticatedPrincipal(
-            subject="jonfairbanks",
-            auth_scheme="postgres_api_key",
-            role="admin",
-            user_id="user-1",
-            api_key_id="key-1",
-        )
-
-    async def fake_create_user(*, subject: str, display_name: str | None, role: str | None):
-        assert subject == "alice"
-        assert display_name == "Alice"
-        assert role == "admin"
-        return {
-            "id": "user-2",
-            "subject": "alice",
-            "display_name": "Alice",
-            "role": role,
-            "is_active": True,
-            "created_at": "2026-03-01T00:00:00+00:00",
-            "updated_at": "2026-03-01T00:00:00+00:00",
-        }
-
-    gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
-    gateway.create_user = fake_create_user  # type: ignore[method-assign]
-
-    response = asyncio.run(
-        server.admin_users_create_handler(
-            _request(
-                headers={"Authorization": "Bearer admin-key"},
-                body={"subject": "alice", "display_name": "Alice", "role": " ADMIN "},
-            )
-        )
-    )
-
-    assert response.status == 201
-    payload = json.loads(response.body.decode("utf-8"))
-    assert payload["user"]["role"] == "admin"
-
-
-def test_admin_users_create_defaults_to_standard_user_without_role() -> None:
-    config = _config_with_upstreams([_upstream()])
-    config.gateway.auth_mode = "postgres_api_keys"
-    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
-    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
-
-    async def fake_authenticate_token(token):
-        return AuthenticatedPrincipal(
-            subject="jonfairbanks",
-            auth_scheme="postgres_api_key",
-            role="admin",
-            user_id="user-1",
-            api_key_id="key-1",
-        )
-
-    async def fake_create_user(*, subject: str, display_name: str | None, role: str | None):
-        assert subject == "alice"
-        assert display_name == "Alice"
-        assert role is None
-        return {
-            "id": "user-2",
-            "subject": "alice",
-            "display_name": "Alice",
-            "role": None,
-            "is_active": True,
-            "created_at": "2026-03-01T00:00:00+00:00",
-            "updated_at": "2026-03-01T00:00:00+00:00",
-        }
-
-    gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
-    gateway.create_user = fake_create_user  # type: ignore[method-assign]
-
-    response = asyncio.run(
-        server.admin_users_create_handler(
-            _request(
-                headers={"Authorization": "Bearer admin-key"},
-                body={"subject": "alice", "display_name": "Alice"},
-            )
-        )
-    )
-
-    assert response.status == 201
-    payload = json.loads(response.body.decode("utf-8"))
-    assert payload["user"]["role"] is None
-
-
-def test_admin_users_update_clears_role_when_null_is_provided() -> None:
-    config = _config_with_upstreams([_upstream()])
-    config.gateway.auth_mode = "postgres_api_keys"
-    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
-    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
-
-    async def fake_authenticate_token(token):
-        return AuthenticatedPrincipal(
-            subject="jonfairbanks",
-            auth_scheme="postgres_api_key",
-            role="admin",
-            user_id="user-1",
-            api_key_id="key-1",
-        )
-
-    async def fake_update_user(
-        user_id: str,
-        *,
-        display_name: str | None = None,
-        role: str | None = None,
-        role_provided: bool = False,
-        is_active: bool | None = None,
-    ):
-        assert user_id == "user-2"
-        assert display_name is None
-        assert role is None
-        assert role_provided is True
-        assert is_active is None
-        return {
-            "id": "user-2",
-            "subject": "alice",
-            "display_name": "Alice",
-            "role": None,
-            "is_active": True,
-            "created_at": "2026-03-01T00:00:00+00:00",
-            "updated_at": "2026-03-02T00:00:00+00:00",
-        }
-
-    gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
-    gateway.update_user = fake_update_user  # type: ignore[method-assign]
-
-    response = asyncio.run(
-        server.admin_users_update_handler(
-            _request(
-                headers={"Authorization": "Bearer admin-key"},
-                body={"role": None},
-                match_info={"user_id": "user-2"},
-            )
-        )
-    )
-
-    assert response.status == 200
-    payload = json.loads(response.body.decode("utf-8"))
-    assert payload["role"] is None
-
-
-def test_admin_usage_handler_returns_grouped_rows() -> None:
-    config = _config_with_upstreams([_upstream()])
-    config.gateway.auth_mode = "postgres_api_keys"
-    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
-    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
-
-    async def fake_authenticate_token(token):
-        return AuthenticatedPrincipal(
-            subject="jonfairbanks",
-            auth_scheme="postgres_api_key",
-            role="admin",
-            user_id="user-1",
-            api_key_id="key-1",
-        )
-
-    async def fake_usage_summary(*, group_by: str, from_timestamp, to_timestamp):
-        assert group_by == "api_key"
-        assert from_timestamp is not None
-        assert to_timestamp is not None
-        return [{"api_key_id": "key-1", "request_count": 3}]
-
-    gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
-    gateway.usage_summary = fake_usage_summary  # type: ignore[method-assign]
-
-    response = asyncio.run(
-        server.admin_usage_handler(
-            _request(
-                headers={"Authorization": "Bearer admin-key"},
-                query={"group_by": "api_key", "from": "2026-03-01T00:00:00Z", "to": "2026-03-31T23:59:59Z"},
-            )
-        )
-    )
-
-    assert response.status == 200
-    payload = json.loads(response.body.decode("utf-8"))
-    assert payload["group_by"] == "api_key"
-    assert payload["items"] == [{"api_key_id": "key-1", "request_count": 3}]
-
-
-def test_admin_usage_handler_hides_invalid_timestamp_details() -> None:
-    config = _config_with_upstreams([_upstream()])
-    config.gateway.auth_mode = "postgres_api_keys"
-    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
-    logger = RecordingLogger()
-    server = HttpServer(config, gateway, logger, GatewayTelemetry())
-
-    async def fake_authenticate_token(token):
-        return AuthenticatedPrincipal(
-            subject="jonfairbanks",
-            auth_scheme="postgres_api_key",
-            role="admin",
-            user_id="user-1",
-            api_key_id="key-1",
-        )
-
-    gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
-
-    response = asyncio.run(
-        server.admin_usage_handler(
-            _request(
-                headers={"Authorization": "Bearer admin-key"},
-                query={"from": "not-a-timestamp"},
-            )
-        )
-    )
-
-    assert response.status == 400
-    payload = json.loads(response.body.decode("utf-8"))
-    assert payload == {"error": "InvalidRequest", "message": "from must be a valid ISO-8601 timestamp"}
-    assert logger.warnings[0][0] == "http_invalid_request"
-    assert logger.warnings[0][1]["endpoint"] == "/v1/admin/usage"
-    assert logger.warnings[0][1]["field"] == "from"
-
-
-def test_admin_groups_create_handler_allows_admin_api_key() -> None:
-    config = _config_with_upstreams([_upstream("jira")])
-    config.gateway.auth_mode = "postgres_api_keys"
-    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
-    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
-
-    async def fake_authenticate_token(token):
-        return AuthenticatedPrincipal(
-            subject="alice",
-            auth_scheme="postgres_api_key",
-            role="admin",
-            user_id="user-1",
-        )
-
-    async def fake_create_group(*, name: str, description: str | None):
-        assert name == "sales"
-        assert description == "Sales team"
-        return {"id": "group-1", "name": "sales", "description": "Sales team"}
-
-    gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
-    gateway.create_group = fake_create_group  # type: ignore[method-assign]
-
-    response = asyncio.run(
-        server.admin_groups_create_handler(
-            _request(
-                headers={"Authorization": "Bearer admin-key"},
-                body={"name": "sales", "description": "Sales team"},
-            )
-        )
-    )
-
-    assert response.status == 201
-    payload = json.loads(response.body.decode("utf-8"))
-    assert payload == {"id": "group-1", "name": "sales", "description": "Sales team"}
-
-
-def test_admin_groups_list_handler_requires_group_read_permission() -> None:
-    config = _config_with_upstreams([_upstream("jira")])
-    config.gateway.auth_mode = "postgres_api_keys"
-    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
-    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
-
-    async def fake_authenticate_token(token):
-        return AuthenticatedPrincipal(
-            subject="bob",
-            auth_scheme="postgres_api_key",
-            group_names=("sales",),
-            user_id="user-2",
-        )
-
-    gateway.authenticate_token = fake_authenticate_token  # type: ignore[method-assign]
-
-    response = asyncio.run(server.admin_groups_list_handler(_request(headers={"Authorization": "Bearer user-key"})))
-
-    assert response.status == 403
-    payload = json.loads(response.body.decode("utf-8"))
-    assert payload["error"]["data"]["category"] == "policy_denied"
-    assert payload["error"]["data"]["permission"] == "admin.groups.read"
 
 
 def test_mcp_post_handler_returns_accepted_for_notification_batches() -> None:
@@ -1734,6 +1384,37 @@ def test_mcp_post_handler_rejects_unsupported_protocol_header() -> None:
 
     assert response.status == 400
     assert response.text == "Unsupported MCP-Protocol-Version header."
+
+
+def test_mcp_post_handler_accepts_supported_legacy_protocol_header() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_json():
+        return {"jsonrpc": "2.0", "id": "list-1", "method": "tools/list", "params": {}}
+
+    async def fake_handle(payload, request_context):
+        return GatewayResult(
+            payload={"jsonrpc": "2.0", "id": payload.get("id"), "result": {"tools": []}},
+            success=True,
+            cache_hit=False,
+            upstream_id=None,
+            tool_name=None,
+            request_id=UUID("00000000-0000-0000-0000-000000000000"),
+        )
+
+    gateway.handle = fake_handle  # type: ignore[method-assign]
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer secret", "MCP-Protocol-Version": LEGACY_PROTOCOL_VERSION},
+        remote="127.0.0.1",
+        json=fake_json,
+    )
+
+    response = asyncio.run(server.mcp_post_handler(request))
+
+    assert response.status == 200
+    assert response.headers["MCP-Protocol-Version"] == LEGACY_PROTOCOL_VERSION
 
 
 def test_error_middleware_maps_gateway_http_errors_to_rest_responses() -> None:
