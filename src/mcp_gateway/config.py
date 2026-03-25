@@ -19,6 +19,10 @@ VALID_AUTH_MODES = frozenset(
     }
 )
 VALID_UPSTREAM_TRANSPORTS = frozenset({"stdio", "streamable_http"})
+READINESS_MODE_ANY = "any"
+READINESS_MODE_REQUIRED = "required"
+READINESS_MODE_THRESHOLD = "threshold"
+VALID_READINESS_MODES = frozenset({READINESS_MODE_ANY, READINESS_MODE_REQUIRED, READINESS_MODE_THRESHOLD})
 
 
 @dataclass
@@ -36,12 +40,20 @@ class GatewayConfig:
     circuit_breaker_fail_threshold: int
     circuit_breaker_open_seconds: int
     public_metrics: bool = False
+    tracing_enabled: bool = False
+    readiness_mode: str = READINESS_MODE_ANY
+    required_ready_upstreams: List[str] = field(default_factory=list)
+    readiness_min_healthy_upstreams: Optional[int] = None
+    readiness_min_healthy_percent: Optional[int] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
         auth_mode = str(_get(data, "auth_mode", AUTH_MODE_SINGLE_SHARED))
         if auth_mode not in VALID_AUTH_MODES:
             raise ValueError("gateway.auth_mode must be one of: single_shared, postgres_api_keys")
+        readiness_mode = str(_get(data, "readiness_mode", READINESS_MODE_ANY))
+        if readiness_mode not in VALID_READINESS_MODES:
+            raise ValueError("gateway.readiness_mode must be one of: any, required, threshold")
         return cls(
             listen_host=_get(data, "listen_host", "0.0.0.0"),
             listen_port=int(_get(data, "listen_port", 8080)),
@@ -56,6 +68,13 @@ class GatewayConfig:
             circuit_breaker_fail_threshold=int(_get(data, "circuit_breaker_fail_threshold", 20)),
             circuit_breaker_open_seconds=int(_get(data, "circuit_breaker_open_seconds", 30)),
             public_metrics=bool(_get(data, "public_metrics", False)),
+            tracing_enabled=bool(_get(data, "tracing_enabled", False)),
+            readiness_mode=readiness_mode,
+            required_ready_upstreams=[
+                str(item) for item in _string_list(_get(data, "required_ready_upstreams", []), "gateway.required_ready_upstreams")
+            ],
+            readiness_min_healthy_upstreams=_optional_int(_get(data, "readiness_min_healthy_upstreams", None)),
+            readiness_min_healthy_percent=_optional_int(_get(data, "readiness_min_healthy_percent", None)),
         )
 
 
@@ -163,12 +182,14 @@ class AppConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "AppConfig":
-        return cls(
+        config = cls(
             gateway=GatewayConfig.from_dict(data.get("gateway", {})),
             logging=LoggingConfig.from_dict(data.get("logging", {})),
             cache=CacheConfig.from_dict(data.get("cache", {})),
             upstreams=[UpstreamConfig.from_dict(item) for item in (data.get("upstreams", []) or [])],
         )
+        _validate_app_config(config)
+        return config
 
 
 def _get(data: Dict[str, Any], key: str, default: Any) -> Any:
@@ -258,3 +279,97 @@ def load_config(path: str) -> AppConfig:
     with open(path, "r", encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
     return AppConfig.from_dict(_expand_env_refs(raw))
+
+
+def _validate_app_config(config: AppConfig) -> None:
+    errors: list[str] = []
+    gateway = config.gateway
+
+    if gateway.listen_port <= 0 or gateway.listen_port > 65535:
+        errors.append("gateway.listen_port must be between 1 and 65535")
+    if gateway.request_max_bytes <= 0:
+        errors.append("gateway.request_max_bytes must be greater than 0")
+    if gateway.rate_limit_per_minute <= 0:
+        errors.append("gateway.rate_limit_per_minute must be greater than 0")
+    if gateway.circuit_breaker_fail_threshold <= 0:
+        errors.append("gateway.circuit_breaker_fail_threshold must be greater than 0")
+    if gateway.circuit_breaker_open_seconds <= 0:
+        errors.append("gateway.circuit_breaker_open_seconds must be greater than 0")
+    if config.cache.max_entries <= 0:
+        errors.append("cache.max_entries must be greater than 0")
+    if config.cache.default_ttl_minutes <= 0:
+        errors.append("cache.default_ttl_minutes must be greater than 0")
+    if gateway.required_ready_upstreams:
+        duplicates = sorted({item for item in gateway.required_ready_upstreams if gateway.required_ready_upstreams.count(item) > 1})
+        for upstream_id in duplicates:
+            errors.append(f"gateway.required_ready_upstreams contains duplicate entry {upstream_id!r}")
+    if gateway.readiness_min_healthy_upstreams is not None and gateway.readiness_min_healthy_upstreams <= 0:
+        errors.append("gateway.readiness_min_healthy_upstreams must be greater than 0 when provided")
+    if gateway.readiness_min_healthy_percent is not None and not 1 <= gateway.readiness_min_healthy_percent <= 100:
+        errors.append("gateway.readiness_min_healthy_percent must be between 1 and 100 when provided")
+
+    seen_upstream_ids: set[str] = set()
+    seen_routes: list[tuple[str, str]] = []
+    for upstream in config.upstreams:
+        path = f"upstreams[{upstream.id}]"
+        if upstream.id in seen_upstream_ids:
+            errors.append(f"Duplicate upstream id: {upstream.id!r}")
+        else:
+            seen_upstream_ids.add(upstream.id)
+
+        if upstream.transport == "streamable_http":
+            if not isinstance(upstream.endpoint, str) or not upstream.endpoint.strip():
+                errors.append(f"{path}.endpoint is required when transport is 'streamable_http'")
+        if upstream.transport == "stdio":
+            if not upstream.command:
+                errors.append(f"{path}.command is required when transport is 'stdio'")
+
+        if upstream.timeout_ms <= 0:
+            errors.append(f"{path}.timeout_ms must be greater than 0")
+        if upstream.stdio_read_limit_bytes <= 0:
+            errors.append(f"{path}.stdio_read_limit_bytes must be greater than 0")
+        if upstream.max_in_flight <= 0:
+            errors.append(f"{path}.max_in_flight must be greater than 0")
+        if upstream.cache_ttl_minutes is not None and upstream.cache_ttl_minutes <= 0:
+            errors.append(f"{path}.cache_ttl_minutes must be greater than 0 when provided")
+        if upstream.circuit_breaker_fail_threshold is not None and upstream.circuit_breaker_fail_threshold <= 0:
+            errors.append(f"{path}.circuit_breaker_fail_threshold must be greater than 0 when provided")
+        if upstream.circuit_breaker_open_seconds is not None and upstream.circuit_breaker_open_seconds <= 0:
+            errors.append(f"{path}.circuit_breaker_open_seconds must be greater than 0 when provided")
+
+        for route in upstream.tool_routes:
+            normalized = route.strip()
+            if not normalized:
+                errors.append(f"{path}.tool_routes must not contain empty strings")
+                continue
+            for existing_route, existing_upstream_id in seen_routes:
+                same_upstream = existing_upstream_id == upstream.id
+                if same_upstream:
+                    continue
+                if normalized == existing_route:
+                    errors.append(
+                        f"Conflicting tool route {normalized!r}: assigned to both {existing_upstream_id!r} and {upstream.id!r}"
+                    )
+                    continue
+                if normalized.startswith(existing_route) or existing_route.startswith(normalized):
+                    errors.append(
+                        "Ambiguous overlapping tool routes: "
+                        f"{existing_route!r} ({existing_upstream_id!r}) and {normalized!r} ({upstream.id!r})"
+                    )
+            seen_routes.append((normalized, upstream.id))
+
+    if gateway.readiness_mode == READINESS_MODE_REQUIRED:
+        if not gateway.required_ready_upstreams:
+            errors.append("gateway.required_ready_upstreams must not be empty when gateway.readiness_mode is 'required'")
+        unknown_required = sorted(set(gateway.required_ready_upstreams) - seen_upstream_ids)
+        for upstream_id in unknown_required:
+            errors.append(f"gateway.required_ready_upstreams references unknown upstream {upstream_id!r}")
+    if gateway.readiness_mode == READINESS_MODE_THRESHOLD:
+        if gateway.readiness_min_healthy_upstreams is None and gateway.readiness_min_healthy_percent is None:
+            errors.append(
+                "gateway.readiness_mode 'threshold' requires gateway.readiness_min_healthy_upstreams "
+                "or gateway.readiness_min_healthy_percent"
+            )
+
+    if errors:
+        raise ValueError("Invalid configuration:\n- " + "\n- ".join(errors))
