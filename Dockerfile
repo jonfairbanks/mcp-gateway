@@ -4,14 +4,10 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV CHROME_PATH=/usr/bin/chromium
-ENV CHROME_BIN=/usr/bin/chromium
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    chromium \
     nodejs \
     npm \
     && rm -rf /var/lib/apt/lists/*
