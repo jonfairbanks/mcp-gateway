@@ -10,7 +10,7 @@ It is intended for operators and platform engineers who need to:
 - share cache and audit state across replicas
 - observe tool usage and upstream health
 
-The gateway speaks MCP over `POST /mcp` and currently supports MCP protocol version `2025-11-25` only.
+The gateway speaks MCP over `POST /mcp` and currently supports MCP protocol versions `2025-03-26` and `2025-11-25`, defaulting to `2025-11-25`.
 
 <img src="docs/mcp-gateway-architecture.svg" alt="MCP Gateway Architecture" width="75%">
 
@@ -30,6 +30,7 @@ For operators:
 - stores audit logs, shared cache entries, and shared rate-limit state in Postgres
 - exposes Prometheus metrics at `GET /metrics`
 - supports single shared bearer auth or Postgres-backed API keys with RBAC
+- keeps the HTTP surface focused on MCP traffic, runtime visibility, and self-service; use CLI commands for operator workflows
 
 ## Prerequisites
 
@@ -42,8 +43,8 @@ Before deploying, make sure you have:
 
 ## Quick Start
 
-1. Copy [`config.example.yaml`](config.example.yaml) to your deployment config path.
-2. Set secrets and tokens with environment variables instead of committing them into the config file.
+1. Start from [`config.example.yaml`](config.example.yaml).
+2. For local development, you can run it directly. For deployment-specific use, copy it to `config.yaml` and replace the getting-started defaults.
 3. Apply the schema:
 
 ```bash
@@ -54,9 +55,10 @@ psql "$DATABASE_URL" -f schema.sql
 
 ```bash
 pip install .
+cp config.example.yaml config.yaml
 export MCP_GATEWAY_API_KEY='change-me'
 export DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway'
-mcp-gateway serve --config /path/to/config.yaml
+mcp-gateway serve --config ./config.yaml
 ```
 
 If a `.env` file is present in the working directory, `mcp-gateway` loads it automatically at startup.
@@ -105,7 +107,7 @@ upstreams:
 - `${NAME}` requires the environment variable to be set
 - `${NAME:-default}` uses `default` when the variable is unset or empty
 
-This example only shows the smallest useful setup. The gateway has additional optional settings and sensible defaults; see [docs/configuration.md](docs/configuration.md) for the full configuration surface.
+The checked-in example config is intentionally runnable and enables `context7` by default. Uncomment, remove, or customize the other example integrations to match your deployment. See [docs/configuration.md](docs/configuration.md) for the full configuration surface.
 
 ## Guide Map
 
@@ -116,4 +118,3 @@ This example only shows the smallest useful setup. The gateway has additional op
 - RBAC onboarding: [docs/rbac-onboarding.md](docs/rbac-onboarding.md)
 - Development and testing: [docs/development.md](docs/development.md)
 - Database schema: [schema.sql](schema.sql)
-- Postman collection: [docs/postman/mcp-gateway.postman_collection.json](docs/postman/mcp-gateway.postman_collection.json)

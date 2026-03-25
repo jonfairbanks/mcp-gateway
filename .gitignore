@@ -9,3 +9,5 @@ build/
 pip-wheel-metadata/
 config.yaml
 .env
+.DS_Store
+/plans
