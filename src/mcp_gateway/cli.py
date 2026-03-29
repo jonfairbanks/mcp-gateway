@@ -5,12 +5,17 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
+from typing import NoReturn
+
+from dotenv import load_dotenv
 
 from .auth import AuthService
 from .config import (
     AUTH_MODE_POSTGRES_API_KEYS,
     load_config,
 )
+from .errors import ConflictError, NotFoundError
 from .gateway import Gateway
 from .logging import Logger
 from .postgres import PostgresStore
@@ -18,6 +23,14 @@ from .server_http import HttpServer
 from .telemetry import GatewayTelemetry
 
 CACHE_CLEANUP_INTERVAL_SECONDS = 300.0
+
+
+def _load_environment() -> Path | None:
+    dotenv_path = Path.cwd() / ".env"
+    load_dotenv(dotenv_path=dotenv_path)
+    if dotenv_path.exists():
+        return dotenv_path
+    return None
 
 
 def _emit_cli_feedback(logger: Logger, level: str, event: str, **fields) -> None:
@@ -58,6 +71,43 @@ def build_parser() -> argparse.ArgumentParser:
     create_key_parser.add_argument("--role", choices=["admin"])
     create_key_parser.add_argument("--key-name", default="default")
     create_key_parser.add_argument("--expires-days", type=int)
+
+    validate_parser = subparsers.add_parser("validate-config")
+    validate_parser.add_argument("--config", required=True)
+
+    warmup_parser = subparsers.add_parser("warmup-check")
+    warmup_parser.add_argument("--config", required=True)
+
+    integrations_parser = subparsers.add_parser("list-integrations")
+    integrations_parser.add_argument("--config", required=True)
+
+    create_user_parser = subparsers.add_parser("create-user")
+    create_user_parser.add_argument("--config", required=True)
+    create_user_parser.add_argument("--subject", required=True)
+    create_user_parser.add_argument("--display-name")
+    create_user_parser.add_argument("--role", choices=["admin"])
+    create_user_parser.add_argument("--issue-api-key", action="store_true")
+    create_user_parser.add_argument("--key-name", default="default")
+
+    create_group_parser = subparsers.add_parser("create-group")
+    create_group_parser.add_argument("--config", required=True)
+    create_group_parser.add_argument("--name", required=True)
+    create_group_parser.add_argument("--description")
+
+    add_group_member_parser = subparsers.add_parser("add-group-member")
+    add_group_member_parser.add_argument("--config", required=True)
+    add_group_member_parser.add_argument("--group-id", required=True)
+    add_group_member_parser.add_argument("--subject", required=True)
+
+    grant_integration_parser = subparsers.add_parser("grant-integration")
+    grant_integration_parser.add_argument("--config", required=True)
+    grant_integration_parser.add_argument("--group-id", required=True)
+    grant_integration_parser.add_argument("--upstream-id", required=True)
+
+    grant_platform_parser = subparsers.add_parser("grant-platform")
+    grant_platform_parser.add_argument("--config", required=True)
+    grant_platform_parser.add_argument("--group-id", required=True)
+    grant_platform_parser.add_argument("--permission", required=True)
 
     return parser
 
@@ -102,6 +152,24 @@ def _validate_database_runtime(config, logger: Logger, dsn: str) -> None:
     raise SystemExit(2)
 
 
+def _validate_postgres_admin_runtime(config, logger: Logger, dsn: str) -> None:
+    _validate_database_runtime(config, logger, dsn)
+    if config.gateway.auth_mode == AUTH_MODE_POSTGRES_API_KEYS:
+        return
+    _emit_cli_feedback(
+        logger,
+        "error",
+        "auth_mode_required",
+        reason="gateway.auth_mode must be postgres_api_keys",
+        suggestion="Set gateway.auth_mode to postgres_api_keys before running admin commands",
+    )
+    raise SystemExit(2)
+
+
+def _print_json(payload: object) -> None:
+    print(json.dumps(payload, separators=(",", ":")))
+
+
 async def _run_cache_cleanup_loop(store: PostgresStore, logger: Logger) -> None:
     try:
         while True:
@@ -123,8 +191,11 @@ async def _run_cache_cleanup_loop(store: PostgresStore, logger: Logger) -> None:
 
 
 async def _run_http(config_path: str) -> None:
+    dotenv_path = _load_environment()
     config = load_config(config_path)
     logger = Logger(stdout_json=config.logging.stdout_json)
+    if dotenv_path is not None:
+        logger.info("dotenv_loaded", path=str(dotenv_path))
     _validate_runtime_config(config, logger)
     dsn = os.getenv("DATABASE_URL", "")
     _validate_database_runtime(config, logger, dsn)
@@ -136,7 +207,7 @@ async def _run_http(config_path: str) -> None:
         )
     store = PostgresStore(dsn)
     await store.start()
-    telemetry = GatewayTelemetry()
+    telemetry = GatewayTelemetry(enabled=config.gateway.tracing_enabled)
     gateway = Gateway(config, store, logger, telemetry)
     cache_cleanup_task: asyncio.Task[None] | None = None
     try:
@@ -169,8 +240,11 @@ async def _run_create_api_key(
     key_name: str,
     expires_days: int | None,
 ) -> None:
+    dotenv_path = _load_environment()
     config = load_config(config_path)
     logger = Logger(stdout_json=False)
+    if dotenv_path is not None:
+        logger.info("dotenv_loaded", path=str(dotenv_path))
     dsn = os.getenv("DATABASE_URL", "")
     _validate_database_runtime(config, logger, dsn)
     if config.gateway.auth_mode != AUTH_MODE_POSTGRES_API_KEYS:
@@ -198,6 +272,154 @@ async def _run_create_api_key(
     print(json.dumps(issued, separators=(",", ":")))
 
 
+def _run_validate_config(config_path: str) -> None:
+    dotenv_path = _load_environment()
+    config = load_config(config_path)
+    logger = Logger(stdout_json=False)
+    if dotenv_path is not None:
+        logger.info("dotenv_loaded", path=str(dotenv_path))
+    logger.info(
+        "config_valid",
+        config_path=config_path,
+        upstream_count=len(config.upstreams),
+        auth_mode=config.gateway.auth_mode,
+    )
+
+
+async def _open_gateway_context(
+    config_path: str,
+    *,
+    require_postgres_admin: bool = False,
+) -> tuple[Logger, PostgresStore, GatewayTelemetry, Gateway]:
+    dotenv_path = _load_environment()
+    config = load_config(config_path)
+    logger = Logger(stdout_json=False)
+    if dotenv_path is not None:
+        logger.info("dotenv_loaded", path=str(dotenv_path))
+    dsn = os.getenv("DATABASE_URL", "")
+    if require_postgres_admin:
+        _validate_postgres_admin_runtime(config, logger, dsn)
+    elif config.gateway.auth_mode == AUTH_MODE_POSTGRES_API_KEYS:
+        _validate_database_runtime(config, logger, dsn)
+    store = PostgresStore(dsn)
+    await store.start()
+    telemetry = GatewayTelemetry(enabled=config.gateway.tracing_enabled)
+    gateway = Gateway(config, store, logger, telemetry)
+    return logger, store, telemetry, gateway
+
+
+async def _run_warmup_check(config_path: str) -> None:
+    _, store, telemetry, gateway = await _open_gateway_context(config_path)
+    try:
+        await gateway.warmup()
+        _print_json(gateway.startup_summary())
+    finally:
+        await gateway.close()
+        await telemetry.close()
+        await store.close()
+
+
+async def _run_list_integrations(config_path: str) -> None:
+    _, store, telemetry, gateway = await _open_gateway_context(config_path)
+    try:
+        _print_json({"items": await gateway.list_integrations()})
+    finally:
+        await gateway.close()
+        await telemetry.close()
+        await store.close()
+
+
+def _handle_admin_command_error(exc: Exception) -> "NoReturn":
+    logger = Logger(stdout_json=False)
+    if isinstance(exc, ConflictError):
+        _emit_cli_feedback(logger, "error", "conflict", reason=str(exc))
+        raise SystemExit(2)
+    if isinstance(exc, NotFoundError):
+        _emit_cli_feedback(logger, "error", "not_found", reason=str(exc))
+        raise SystemExit(2)
+    if isinstance(exc, ValueError):
+        _emit_cli_feedback(logger, "error", "invalid_request", reason=str(exc))
+        raise SystemExit(2)
+    raise exc
+
+
+async def _run_create_user(
+    config_path: str,
+    *,
+    subject: str,
+    display_name: str | None,
+    role: str | None,
+    issue_api_key: bool,
+    key_name: str,
+) -> None:
+    _, store, telemetry, gateway = await _open_gateway_context(config_path, require_postgres_admin=True)
+    try:
+        user = await gateway.create_user(subject=subject, display_name=display_name, role=role)
+        if user is None:
+            raise ConflictError("A user with that subject already exists.")
+        payload: dict[str, object] = {"user": user}
+        if issue_api_key:
+            payload["issued_api_key"] = await gateway.issue_api_key_for_user(user_id=user["id"], key_name=key_name)
+        _print_json(payload)
+    except (ConflictError, NotFoundError, ValueError) as exc:
+        _handle_admin_command_error(exc)
+    finally:
+        await gateway.close()
+        await telemetry.close()
+        await store.close()
+
+
+async def _run_create_group(config_path: str, *, name: str, description: str | None) -> None:
+    _, store, telemetry, gateway = await _open_gateway_context(config_path, require_postgres_admin=True)
+    try:
+        group = await gateway.create_group(name=name, description=description)
+        if group is None:
+            raise ConflictError("A group with that name already exists.")
+        _print_json(group)
+    except (ConflictError, NotFoundError, ValueError) as exc:
+        _handle_admin_command_error(exc)
+    finally:
+        await gateway.close()
+        await telemetry.close()
+        await store.close()
+
+
+async def _run_add_group_member(config_path: str, *, group_id: str, subject: str) -> None:
+    _, store, telemetry, gateway = await _open_gateway_context(config_path, require_postgres_admin=True)
+    try:
+        _print_json(await gateway.add_group_member(group_id, subject=subject))
+    except (ConflictError, NotFoundError, ValueError) as exc:
+        _handle_admin_command_error(exc)
+    finally:
+        await gateway.close()
+        await telemetry.close()
+        await store.close()
+
+
+async def _run_grant_integration(config_path: str, *, group_id: str, upstream_id: str) -> None:
+    _, store, telemetry, gateway = await _open_gateway_context(config_path, require_postgres_admin=True)
+    try:
+        _print_json(await gateway.add_group_integration_grant(group_id, upstream_id=upstream_id))
+    except (ConflictError, NotFoundError, ValueError) as exc:
+        _handle_admin_command_error(exc)
+    finally:
+        await gateway.close()
+        await telemetry.close()
+        await store.close()
+
+
+async def _run_grant_platform(config_path: str, *, group_id: str, permission: str) -> None:
+    _, store, telemetry, gateway = await _open_gateway_context(config_path, require_postgres_admin=True)
+    try:
+        _print_json(await gateway.add_group_platform_grant(group_id, permission=permission))
+    except (ConflictError, NotFoundError, ValueError) as exc:
+        _handle_admin_command_error(exc)
+    finally:
+        await gateway.close()
+        await telemetry.close()
+        await store.close()
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -216,6 +438,31 @@ def main() -> None:
                     expires_days=args.expires_days,
                 )
             )
+        elif args.command == "validate-config":
+            _run_validate_config(args.config)
+        elif args.command == "warmup-check":
+            asyncio.run(_run_warmup_check(args.config))
+        elif args.command == "list-integrations":
+            asyncio.run(_run_list_integrations(args.config))
+        elif args.command == "create-user":
+            asyncio.run(
+                _run_create_user(
+                    args.config,
+                    subject=args.subject,
+                    display_name=args.display_name,
+                    role=args.role,
+                    issue_api_key=args.issue_api_key,
+                    key_name=args.key_name,
+                )
+            )
+        elif args.command == "create-group":
+            asyncio.run(_run_create_group(args.config, name=args.name, description=args.description))
+        elif args.command == "add-group-member":
+            asyncio.run(_run_add_group_member(args.config, group_id=args.group_id, subject=args.subject))
+        elif args.command == "grant-integration":
+            asyncio.run(_run_grant_integration(args.config, group_id=args.group_id, upstream_id=args.upstream_id))
+        elif args.command == "grant-platform":
+            asyncio.run(_run_grant_platform(args.config, group_id=args.group_id, permission=args.permission))
         else:
             raise SystemExit(f"Unknown command: {args.command}")
     except KeyboardInterrupt:

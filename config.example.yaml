@@ -1,30 +1,29 @@
+#
+# Copy this file to config.yaml before production use and replace the
+# getting-started defaults below. Uncomment and customize the upstreams
+# you want to expose.
+#
+
 gateway:
   listen_host: "0.0.0.0"
   listen_port: 8080
   auth_mode: "single_shared"
   api_key: "${MCP_GATEWAY_API_KEY:-change-me}"
-  bootstrap_admin_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY:-}"
   allow_unauthenticated: false
-  public_tools_catalog: false
-  rate_limit_per_minute: 120
+  public_tools_catalog: true
+  public_metrics: true
 
 logging:
   stdout_json: true
-  extra_redact_fields: []
 
 cache:
   enabled: true
-  max_entries: 10000
-  default_ttl_minutes: 60
-  client_scoped_tools: []
+  allowed_tools: []
+  globally_shareable_tools: []
 
 upstreams:
-  ############
-  # Context7 #
-  ############
-
   - id: "context7"
-    name: "context7"
+    name: "Context7 MCP"
     transport: "stdio"
     command: "npx"
     args:
@@ -35,110 +34,110 @@ upstreams:
     tool_routes:
       - "context7."
 
-  ###################
-  # Chrome DevTools #
-  ###################
+###################
+# Chrome DevTools #
+###################
 
-  - id: "chrome-devtools"
-    name: "chrome-devtools"
-    transport: "stdio"
-    command: "npx"
-    args:
-      - "-y"
-      - "chrome-devtools-mcp@latest"
-      - "--headless"
-      - "--no-usage-statistics"
-    env: {}
-    deny_tools: []
+# - id: "chrome-devtools"
+#   name: "Chrome DevTools MCP"
+#   transport: "stdio"
+#   command: "npx"
+#   args:
+#     - "-y"
+#     - "chrome-devtools-mcp@latest"
+#     - "--headless"
+#     - "--no-usage-statistics"
+#   env: {}
+#   deny_tools: []
 
-  ###################
-  # Endor Labs AURI #
-  ###################
+###################
+# Endor Labs AURI #
+###################
 
-  - id: "endor-cli-tools"
-    name: "endor-cli-tools"
-    transport: "stdio"
-    command: "npx"
-    args:
-      - "-y"
-      - "endorctl"
-      - "ai-tools"
-      - "mcp-server"
-    env: {}
-    timeout_ms: 180000
-    deny_tools: []
-    tool_routes:
-      - "endor."
+# - id: "endor-cli-tools"
+#   name: "Endor Labs AURI MCP"
+#   transport: "stdio"
+#   command: "npx"
+#   args:
+#     - "-y"
+#     - "endorctl"
+#     - "ai-tools"
+#     - "mcp-server"
+#   env: {}
+#   timeout_ms: 180000
+#   deny_tools: []
+#   tool_routes:
+#     - "endor."
 
-  ##########
-  # Notion #
-  ##########
+##########
+# Notion #
+##########
 
-  # - id: "notion"
-  #   name: "notion"
-  #   transport: "stdio"
-  #   command: "npx"
-  #   args:
-  #     - "-y"
-  #     - "@notionhq/notion-mcp-server"
-  #   env: {}
-  #   deny_tools:
-  #     - "API-post-page"
-  #     - "API-patch-page"
-  #     - "API-patch-block-children"
-  #     - "API-update-a-block"
-  #     - "API-delete-a-block"
-  #     - "API-create-a-comment"
-  #     - "API-update-a-data-source"
-  #     - "API-create-a-data-source"
-  #     - "API-move-page"
-  #   tool_routes:
-  #     - "notion."
+# - id: "notion"
+#   name: "Notion MCP"
+#   transport: "stdio"
+#   command: "npx"
+#   args:
+#     - "-y"
+#     - "@notionhq/notion-mcp-server"
+#   env: {}
+#   deny_tools:
+#     - "API-post-page"
+#     - "API-patch-page"
+#     - "API-patch-block-children"
+#     - "API-update-a-block"
+#     - "API-delete-a-block"
+#     - "API-create-a-comment"
+#     - "API-update-a-data-source"
+#     - "API-create-a-data-source"
+#     - "API-move-page"
+#   tool_routes:
+#     - "notion."
 
-  #######
-  # AWS #
-  #######
+#######
+# AWS #
+#######
 
-  # - id: "aws-mcp"
-  #   name: "aws-mcp"
-  #   transport: "stdio"
-  #   command: "uvx"
-  #   args:
-  #     - "mcp-proxy-for-aws@latest"
-  #     - "https://aws-mcp.us-east-1.api.aws/mcp"
-  #     - "--metadata"
-  #     - "AWS_REGION=us-east-1"
-  #   env:
-  #     AWS_ACCESS_KEY_ID: "..."
-  #     AWS_SECRET_ACCESS_KEY: "..."
-  #   deny_tools: []
-  #   tool_routes:
-  #     - "aws."
+# - id: "aws-mcp"
+#   name: "Amazon Web Services (AWS) MCP"
+#   transport: "stdio"
+#   command: "uvx"
+#   args:
+#     - "mcp-proxy-for-aws@latest"
+#     - "https://aws-mcp.us-east-1.api.aws/mcp"
+#     - "--metadata"
+#     - "AWS_REGION=us-east-1"
+#   env:
+#     AWS_ACCESS_KEY_ID: "..."
+#     AWS_SECRET_ACCESS_KEY: "..."
+#   deny_tools: []
+#   tool_routes:
+#     - "aws."
 
-  ###########
-  # Grafana #
-  ###########
+###########
+# Grafana #
+###########
 
-  # - id: "grafana"
-  #   name: "grafana"
-  #   transport: "stdio"
-  #   command: "uvx"
-  #   args:
-  #     - "mcp-grafana"
-  #   env:
-  #     GRAFANA_URL: "${GRAFANA_URL:-http://localhost:3000}"
-  #     GRAFANA_SERVICE_ACCOUNT_TOKEN: "${GRAFANA_SERVICE_ACCOUNT_TOKEN:-change-me}"
-  #   timeout_ms: 180000
-  #   deny_tools: []
+# - id: "grafana"
+#   name: "Grafana MCP"
+#   transport: "stdio"
+#   command: "uvx"
+#   args:
+#     - "mcp-grafana"
+#   env:
+#     GRAFANA_URL: "${GRAFANA_URL:-http://localhost:3000}"
+#     GRAFANA_SERVICE_ACCOUNT_TOKEN: "${GRAFANA_SERVICE_ACCOUNT_TOKEN}"
+#   timeout_ms: 180000
+#   deny_tools: []
 
-  ##########
-  # GitHub #
-  ##########
+##########
+# GitHub #
+##########
 
-  # - id: "github"
-  #   name: "github"
-  #   transport: "streamable_http"
-  #   endpoint: "https://api.githubcopilot.com/mcp/"
-  #   bearer_token_env_var: "GITHUB_PAT_TOKEN"
-  #   timeout_ms: 30000
-  #   deny_tools: []
+# - id: "github"
+#   name: "GitHub MCP"
+#   transport: "streamable_http"
+#   endpoint: "https://api.githubcopilot.com/mcp/"
+#   bearer_token_env_var: "GITHUB_PAT_TOKEN"
+#   timeout_ms: 30000
+#   deny_tools: []

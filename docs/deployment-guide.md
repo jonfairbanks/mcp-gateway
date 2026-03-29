@@ -31,8 +31,8 @@ Before deploying, make sure you have:
 
 ## Quick Start
 
-1. Copy [`config.example.yaml`](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/config.example.yaml) to your deployment config path.
-2. Set secrets and tokens with environment variables instead of committing them into the config file.
+1. Start from [`config.example.yaml`](../config.example.yaml).
+2. For deployment-specific use, copy it to `config.yaml` and replace the getting-started defaults.
 3. Apply the schema:
 
 ```bash
@@ -43,10 +43,13 @@ psql "$DATABASE_URL" -f schema.sql
 
 ```bash
 pip install .
+cp config.example.yaml config.yaml
 export MCP_GATEWAY_API_KEY='change-me'
 export DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway'
-mcp-gateway serve --config /path/to/config.yaml
+mcp-gateway serve --config ./config.yaml
 ```
+
+If a `.env` file is present in the working directory, `mcp-gateway` loads it automatically at startup.
 
 5. Verify the service:
 
@@ -60,47 +63,36 @@ curl -H 'Authorization: Bearer change-me' http://localhost:8080/tools
 
 ```yaml
 gateway:
-  listen_host: "0.0.0.0"
-  listen_port: 8080
   auth_mode: "single_shared"
   api_key: "${MCP_GATEWAY_API_KEY}"
-  bootstrap_admin_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY:-}"
-  allow_unauthenticated: false
-  public_tools_catalog: false
-  trusted_proxies: ["127.0.0.1", "::1"]
-  request_max_bytes: 2097152
-  rate_limit_per_minute: 120
 
 logging:
   stdout_json: true
-  extra_redact_fields: []
 
 cache:
-  enabled: true
-  max_entries: 10000
   default_ttl_minutes: 60
-  client_scoped_tools: []
 
 upstreams:
   - id: "context7"
-    name: "context7"
     transport: "stdio"
     command: "npx"
-    args: ["-y", "@upstash/context7-mcp"]
+    args:
+      - "-y"
+      - "@upstash/context7-mcp"
     env: {}
 
   - id: "github"
-    name: "github"
     transport: "streamable_http"
     endpoint: "https://api.githubcopilot.com/mcp/"
     bearer_token_env_var: "GITHUB_PAT_TOKEN"
-    timeout_ms: 30000
 ```
 
 `config.yaml` supports explicit env interpolation:
 
 - `${NAME}` requires the environment variable to be set
 - `${NAME:-default}` uses `default` when the variable is unset or empty
+
+This example only shows the smallest useful setup. The checked-in example config enables `context7` by default and keeps broad admin HTTP off by default. See [`docs/configuration.md`](./configuration.md) for the full configuration surface and defaults.
 
 ## Authentication Modes
 
@@ -122,7 +114,7 @@ Characteristics:
 
 - users authenticate with Postgres-backed API keys
 - `admin` retains full platform access
-- standard users authenticate successfully but require RBAC grants for tool execution and delegated admin APIs
+- standard users authenticate successfully but require RBAC grants for tool execution and delegated operator workflows
 - supports break-glass access through `gateway.bootstrap_admin_api_key`
 
 To seed the first admin key:
@@ -151,32 +143,23 @@ For standard users, omit `--role` and grant access through groups and integratio
 
 ### Management endpoints
 
-Available when `gateway.auth_mode` is `postgres_api_keys`:
+Always available self-service endpoints:
 
 - `GET /v1/me`
 - `GET /v1/me/api-keys`
 - `POST /v1/me/api-keys`
 - `DELETE /v1/me/api-keys/{key_id}`
-- `GET /v1/admin/identities`
-- `PUT /v1/admin/identities/{subject}`
-- `PATCH /v1/admin/identities/{subject}`
-- `GET /v1/admin/users`
-- `POST /v1/admin/users`
-- `PATCH /v1/admin/users/{user_id}`
-- `GET /v1/admin/integrations`
-- `GET /v1/admin/groups`
-- `POST /v1/admin/groups`
-- `PATCH /v1/admin/groups/{group_id}`
-- `DELETE /v1/admin/groups/{group_id}`
-- `POST /v1/admin/groups/{group_id}/members`
-- `DELETE /v1/admin/groups/{group_id}/members/{subject}`
-- `GET /v1/admin/groups/{group_id}/integration-grants`
-- `POST /v1/admin/groups/{group_id}/integration-grants`
-- `DELETE /v1/admin/groups/{group_id}/integration-grants/{upstream_id}`
-- `GET /v1/admin/groups/{group_id}/platform-grants`
-- `POST /v1/admin/groups/{group_id}/platform-grants`
-- `DELETE /v1/admin/groups/{group_id}/platform-grants/{permission}`
-- `GET /v1/admin/usage`
+
+Operator workflows use the CLI rather than an HTTP admin control plane:
+
+- `mcp-gateway validate-config --config ./config.yaml`
+- `mcp-gateway warmup-check --config ./config.yaml`
+- `mcp-gateway list-integrations --config ./config.yaml`
+- `mcp-gateway create-user --config ./config.yaml --subject alice --display-name Alice --issue-api-key`
+- `mcp-gateway create-group --config ./config.yaml --name sales --description "Sales team"`
+- `mcp-gateway add-group-member --config ./config.yaml --group-id <group-id> --subject alice`
+- `mcp-gateway grant-integration --config ./config.yaml --group-id <group-id> --upstream-id jira`
+- `mcp-gateway grant-platform --config ./config.yaml --group-id <group-id> --permission admin.usage.read`
 
 ## Upstream Configuration Guidance
 
@@ -190,7 +173,9 @@ Recommended pattern:
 - id: "context7"
   transport: "stdio"
   command: "npx"
-  args: ["-y", "@upstash/context7-mcp"]
+  args:
+    - "-y"
+    - "@upstash/context7-mcp"
   env: {}
 ```
 
@@ -218,6 +203,18 @@ Notes:
 - the gateway expects MCP Streamable HTTP semantics
 - if you need custom static headers, use `http_headers`
 - if the upstream requires serialized requests, set `http_serialize_requests: true`
+
+## OpenTelemetry Tracing
+
+Tracing is optional and uses standard OTEL environment variables. A common setup looks like:
+
+```bash
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+export OTEL_SERVICE_NAME=mcp-gateway
+```
+
+When enabled, the gateway emits spans for inbound HTTP requests, MCP request handling, and outbound upstream calls.
 
 ## Docker
 

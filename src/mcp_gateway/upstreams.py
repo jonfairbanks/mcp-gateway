@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 import aiohttp
+from opentelemetry.propagate import inject
 
 from .protocol import CURRENT_PROTOCOL_VERSION, is_supported_protocol_version
 
@@ -59,8 +60,11 @@ class StreamableHTTPUpstream:
     async def _request_headers(self) -> Dict[str, str]:
         headers = dict(self._headers)
         headers.setdefault("Content-Type", "application/json")
+        # Some upstreams still return SSE-framed JSON-RPC responses even when the
+        # gateway only uses POST /mcp, so keep the broader Accept header here.
         headers.setdefault("Accept", "application/json, text/event-stream")
         headers.setdefault("MCP-Protocol-Version", self._protocol_version)
+        inject(headers)
         if self._session_id:
             headers["MCP-Session-ID"] = self._session_id
         if "Authorization" not in headers:
@@ -80,6 +84,8 @@ class StreamableHTTPUpstream:
 
     @asynccontextmanager
     async def _request_guard(self):
+        # Certain vendor MCPs require one-at-a-time HTTP requests even though the
+        # gateway runs other upstreams concurrently.
         if self._serialize_requests:
             async with self._lock:
                 yield
@@ -302,33 +308,42 @@ class StdioUpstream:
 
     async def call(self, payload: Dict[str, Any]) -> UpstreamResponse:
         await self.start()
-        assert self._process
-        assert self._process.stdin
-        assert self._process.stdout
         async with self._lock:
-            try:
-                self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
-                await self._process.stdin.drain()
-            except (BrokenPipeError, ConnectionResetError):
-                await self._discard_dead_process()
-                raise RuntimeError("Upstream stdio closed") from None
             expected_id = payload.get("id")
             deadline = time.monotonic() + self._timeout
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise asyncio.TimeoutError()
-                line = await asyncio.wait_for(self._process.stdout.readline(), timeout=remaining)
-                if not line:
+            for attempt in range(2):
+                if attempt > 0:
+                    await self.start()
+                assert self._process
+                assert self._process.stdin
+                assert self._process.stdout
+                try:
+                    self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
+                    await self._process.stdin.drain()
+                except (BrokenPipeError, ConnectionResetError):
                     await self._discard_dead_process()
-                    raise RuntimeError("Upstream stdio closed")
-                data = json.loads(line.decode("utf-8"))
-                # Stdio upstreams may emit notifications/progress messages between requests.
-                # Keep reading until we receive the response for this request id.
-                if data.get("id") != expected_id:
-                    continue
-                success = "error" not in data
-                return UpstreamResponse(payload=data, success=success)
+                    if attempt == 0:
+                        continue
+                    raise RuntimeError("Upstream stdio closed") from None
+
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError()
+                    line = await asyncio.wait_for(self._process.stdout.readline(), timeout=remaining)
+                    if not line:
+                        await self._discard_dead_process()
+                        if attempt == 0:
+                            break
+                        raise RuntimeError("Upstream stdio closed") from None
+                    data = json.loads(line.decode("utf-8"))
+                    # Stdio upstreams may emit notifications/progress messages between requests.
+                    # Keep reading until we receive the response for this request id.
+                    if data.get("id") != expected_id:
+                        continue
+                    success = "error" not in data
+                    return UpstreamResponse(payload=data, success=success)
+            raise RuntimeError("Upstream stdio closed")
 
     async def notify(self, payload: Dict[str, Any]) -> None:
         await self.start()

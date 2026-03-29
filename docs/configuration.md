@@ -31,8 +31,14 @@ Operational guidance:
 - `auth_mode` default `single_shared`; supported values are `single_shared` and `postgres_api_keys`
 - `api_key` bearer token used in `single_shared` mode
 - `bootstrap_admin_api_key` optional break-glass admin token for `postgres_api_keys` mode
-- `allow_unauthenticated` default `false`; when `true`, MCP execution routes may be open, but the `/v1/me` and `/v1/admin/*` management APIs still require a valid bearer token
+- `allow_unauthenticated` default `false`; when `true`, MCP execution routes may be open, but the `/v1/me` self-service APIs still require a valid bearer token
 - `public_tools_catalog` default `false`; when `true`, `GET /tools` skips auth but still uses rate limiting
+- `public_metrics` default `false`; when `true`, `GET /metrics` skips auth
+- `tracing_enabled` default `false`; when `true`, OTEL exporter environment variables may activate tracing/export
+- `readiness_mode` default `any`; supported values are `any`, `required`, and `threshold`
+- `required_ready_upstreams` default `[]`; required when `readiness_mode` is `required`
+- `readiness_min_healthy_upstreams` optional minimum healthy upstream count for `readiness_mode: threshold`
+- `readiness_min_healthy_percent` optional minimum healthy upstream percentage for `readiness_mode: threshold`
 - `trusted_proxies` default `["127.0.0.1", "::1"]`
   - `X-Forwarded-For` and `X-Client-Id` headers are only trusted when `request.remote` is in this list.
 - `request_max_bytes` default `2097152` (2 MB)
@@ -45,56 +51,57 @@ Deployment notes:
 - `auth_mode: single_shared` is the simplest deployment path
 - `auth_mode: postgres_api_keys` is the correct mode for multi-user deployments
 - `allow_unauthenticated: true` should be treated as a public exposure setting
+- operator workflows such as validation, warmup checks, RBAC setup, and user management are CLI-driven rather than HTTP-admin driven
 
 ## `logging`
 
 - `stdout_json` default `true`
 - `extra_redact_fields` default `[]`; additional case-insensitive payload keys redacted before request/response persistence
+- `store_request_bodies` default `false`
+- `store_response_bodies` default `false`
+- `body_capture_upstreams` default `[]`; request/response bodies for listed upstream IDs may be persisted even when global body capture is off
+- `body_capture_tools` default `[]`; request/response bodies for listed tool names may be persisted even when global body capture is off
 
 ## `cache`
 
 - `enabled` default `true`
 - `max_entries` default `1000` (in-memory cache)
 - `default_ttl_minutes` default `60`
-- `client_scoped_tools` default `[]`
+- `allowed_tools` default `[]`; only listed tools are cacheable
+- `globally_shareable_tools` default `[]`; listed tools may share cache entries across callers
 
-`client_scoped_tools` means cache keys for listed tools include `client_id` so users do not share cached results.
+Cache behavior:
+
+- no tool calls are cached unless they appear in `allowed_tools`
+- cached tools are principal-scoped by default, using API key, user, subject, or client identity
+- only tools in `globally_shareable_tools` may share cache entries across different callers
 
 The in-memory cache is only a local optimization. Shared cache correctness comes from Postgres.
 
-## Management APIs
+## HTTP APIs
 
-When `gateway.auth_mode` is `postgres_api_keys`, the gateway exposes:
+The gateway always exposes self-service endpoints:
 
 - `GET /v1/me`
 - `GET /v1/me/api-keys`
 - `POST /v1/me/api-keys`
 - `DELETE /v1/me/api-keys/{key_id}`
-- `GET /v1/admin/identities`
-- `PUT /v1/admin/identities/{subject}`
-- `PATCH /v1/admin/identities/{subject}`
-- `GET /v1/admin/users`
-- `POST /v1/admin/users`
-- `PATCH /v1/admin/users/{user_id}`
-- `GET /v1/admin/integrations`
-- `GET /v1/admin/groups`
-- `POST /v1/admin/groups`
-- `PATCH /v1/admin/groups/{group_id}`
-- `DELETE /v1/admin/groups/{group_id}`
-- `POST /v1/admin/groups/{group_id}/members`
-- `DELETE /v1/admin/groups/{group_id}/members/{subject}`
-- `GET /v1/admin/groups/{group_id}/integration-grants`
-- `POST /v1/admin/groups/{group_id}/integration-grants`
-- `DELETE /v1/admin/groups/{group_id}/integration-grants/{upstream_id}`
-- `GET /v1/admin/groups/{group_id}/platform-grants`
-- `POST /v1/admin/groups/{group_id}/platform-grants`
-- `DELETE /v1/admin/groups/{group_id}/platform-grants/{permission}`
-- `GET /v1/admin/usage`
+
+There is no broad built-in admin CRUD HTTP surface. Operator workflows move through the CLI:
+
+- `mcp-gateway validate-config`
+- `mcp-gateway warmup-check`
+- `mcp-gateway list-integrations`
+- `mcp-gateway create-user`
+- `mcp-gateway create-group`
+- `mcp-gateway add-group-member`
+- `mcp-gateway grant-integration`
+- `mcp-gateway grant-platform`
 
 Role behavior:
 
-- `admin`: full MCP access plus user management, RBAC management, usage reporting, and API key management
-- standard users: no built-in integration grants; self-service API key management remains available, but tool execution and delegated admin access come from PyCasbin group memberships plus integration or platform grants
+- `admin`: full MCP access plus CLI-based user management, RBAC management, usage reporting, and API key management
+- standard users: no built-in integration grants; self-service API key management remains available, but tool execution and delegated operational access come from PyCasbin group memberships plus integration or platform grants
 
 ## `upstreams[]`
 
@@ -136,7 +143,7 @@ Use `stdio` when the upstream MCP is installed locally on each gateway replica.
 - `http_headers` optional static headers
 - `bearer_token_env_var` optional env var name used if `Authorization` is not provided in `http_headers`
 - `http_serialize_requests` default `false` (concurrent HTTP calls enabled). Set `true` to force one-at-a-time requests for that upstream.
-- Only MCP protocol version `2025-11-25` is supported by the gateway. Older protocol versions are rejected.
+- The gateway currently supports MCP protocol versions `2025-03-26` and `2025-11-25`. Unsupported versions are rejected.
 
 Use `streamable_http` when the upstream MCP is already exposed over HTTP.
 
@@ -153,6 +160,8 @@ gateway:
   bootstrap_admin_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY:-}"
   allow_unauthenticated: false
   public_tools_catalog: false
+  tracing_enabled: false
+  readiness_mode: "any"
 
 logging:
   stdout_json: true
@@ -162,7 +171,8 @@ cache:
   enabled: true
   default_ttl_minutes: 60
   max_entries: 10000
-  client_scoped_tools: []
+  allowed_tools: []
+  globally_shareable_tools: []
 
 upstreams:
   - id: "context7"

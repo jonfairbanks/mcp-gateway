@@ -10,7 +10,7 @@ It is intended for operators and platform engineers who need to:
 - share cache and audit state across replicas
 - observe tool usage and upstream health
 
-The gateway speaks MCP over `POST /mcp` and currently supports MCP protocol version `2025-11-25` only.
+The gateway speaks MCP over `POST /mcp` and currently supports MCP protocol versions `2025-03-26` and `2025-11-25`, defaulting to `2025-11-25`.
 
 <img src="docs/mcp-gateway-architecture.svg" alt="MCP Gateway Architecture" width="75%">
 
@@ -30,6 +30,7 @@ For operators:
 - stores audit logs, shared cache entries, and shared rate-limit state in Postgres
 - exposes Prometheus metrics at `GET /metrics`
 - supports single shared bearer auth or Postgres-backed API keys with RBAC
+- keeps the HTTP surface focused on MCP traffic, runtime visibility, and self-service; use CLI commands for operator workflows
 
 ## Prerequisites
 
@@ -42,8 +43,8 @@ Before deploying, make sure you have:
 
 ## Quick Start
 
-1. Copy [`config.example.yaml`](config.example.yaml) to your deployment config path.
-2. Set secrets and tokens with environment variables instead of committing them into the config file.
+1. Start from [`config.example.yaml`](config.example.yaml).
+2. For local development, you can run it directly. For deployment-specific use, copy it to `config.yaml` and replace the getting-started defaults.
 3. Apply the schema:
 
 ```bash
@@ -54,10 +55,13 @@ psql "$DATABASE_URL" -f schema.sql
 
 ```bash
 pip install .
+cp config.example.yaml config.yaml
 export MCP_GATEWAY_API_KEY='change-me'
 export DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway'
-mcp-gateway serve --config /path/to/config.yaml
+mcp-gateway serve --config ./config.yaml
 ```
+
+If a `.env` file is present in the working directory, `mcp-gateway` loads it automatically at startup.
 
 5. Verify the service:
 
@@ -71,37 +75,27 @@ curl -H 'Authorization: Bearer change-me' http://localhost:8080/tools
 
 ```yaml
 gateway:
-  listen_host: "0.0.0.0"
-  listen_port: 8080
   auth_mode: "single_shared"
   api_key: "${MCP_GATEWAY_API_KEY}"
-  bootstrap_admin_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY:-}"
-  allow_unauthenticated: false
-  public_tools_catalog: false
-  trusted_proxies: ["127.0.0.1", "::1"]
-  request_max_bytes: 2097152
-  rate_limit_per_minute: 120
 
 logging:
   stdout_json: true
-  extra_redact_fields: []
 
 cache:
   enabled: true
-  max_entries: 10000
   default_ttl_minutes: 60
-  client_scoped_tools: []
 
 upstreams:
   - id: "context7"
-    name: "context7"
+    name: "Context7 MCP"
     transport: "stdio"
     command: "npx"
-    args: ["-y", "@upstash/context7-mcp"]
-    env: {}
+    args:
+      - "-y"
+      - "@upstash/context7-mcp"
 
   - id: "github"
-    name: "github"
+    name: "GitHub MCP"
     transport: "streamable_http"
     endpoint: "https://api.githubcopilot.com/mcp/"
     bearer_token_env_var: "GITHUB_PAT_TOKEN"
@@ -113,13 +107,14 @@ upstreams:
 - `${NAME}` requires the environment variable to be set
 - `${NAME:-default}` uses `default` when the variable is unset or empty
 
+The checked-in example config is intentionally runnable and enables `context7` by default. Uncomment, remove, or customize the other example integrations to match your deployment. See [docs/configuration.md](docs/configuration.md) for the full configuration surface.
+
 ## Guide Map
 
-- Deployment guide: [docs/deployment-guide.md](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/deployment-guide.md)
-- Client configuration: [docs/client-configuration.md](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/client-configuration.md)
-- Operations guide: [docs/operations.md](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/operations.md)
-- Configuration reference: [docs/configuration.md](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/configuration.md)
-- RBAC onboarding: [docs/rbac-onboarding.md](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/rbac-onboarding.md)
-- Development and testing: [docs/development.md](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/development.md)
-- Database schema: [schema.sql](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/schema.sql)
-- Postman collection: [docs/postman/mcp-gateway.postman_collection.json](/Users/jonfairbanks/Documents/GitHub/mcp-gateway/docs/postman/mcp-gateway.postman_collection.json)
+- Deployment guide: [docs/deployment-guide.md](docs/deployment-guide.md)
+- Client configuration: [docs/client-configuration.md](docs/client-configuration.md)
+- Operations guide: [docs/operations.md](docs/operations.md)
+- Configuration reference: [docs/configuration.md](docs/configuration.md)
+- RBAC onboarding: [docs/rbac-onboarding.md](docs/rbac-onboarding.md)
+- Development and testing: [docs/development.md](docs/development.md)
+- Database schema: [schema.sql](schema.sql)

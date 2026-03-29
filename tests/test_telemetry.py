@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
 from mcp_gateway.telemetry import GatewayTelemetry
 
 
@@ -31,3 +39,72 @@ def test_prometheus_metrics_drop_tool_name_labels_but_keep_upstream_counts() -> 
     assert 'mcp_gateway_tool_calls_total{cache_hit="true",success="false",upstream_id="grafana"} 1.0' in rendered
     assert 'mcp_gateway_denials_total{upstream_id="context7"} 1.0' in rendered
     assert 'tool_name=' not in rendered
+
+
+def test_tracing_stays_disabled_without_otel_env(monkeypatch) -> None:
+    monkeypatch.delenv("OTEL_TRACES_EXPORTER", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+
+    telemetry = GatewayTelemetry()
+
+    assert telemetry.tracing_enabled is False
+
+
+def test_tracing_stays_disabled_when_otel_env_exists_but_gateway_tracing_is_not_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "console")
+
+    telemetry = GatewayTelemetry()
+
+    assert telemetry.tracing_enabled is False
+
+
+def test_tracing_enables_only_when_gateway_flag_is_set(monkeypatch) -> None:
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "console")
+
+    telemetry = GatewayTelemetry(enabled=True)
+
+    assert telemetry.tracing_enabled is True
+    asyncio.run(telemetry.close())
+
+
+def test_inject_context_adds_traceparent_for_active_span() -> None:
+    telemetry = GatewayTelemetry(tracer_provider=TracerProvider())
+    carrier: dict[str, str] = {}
+
+    with telemetry.start_mcp_span("tools/call", "req-123", client_id="client-1", auth_subject=None):
+        telemetry.inject_context(carrier)
+
+    assert "traceparent" in carrier
+
+
+def test_extract_context_round_trips_traceparent() -> None:
+    propagator = TraceContextTextMapPropagator()
+    carrier = {
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    }
+
+    context = GatewayTelemetry(tracer_provider=TracerProvider()).extract_context(carrier)
+    extracted = propagator.extract(carrier=carrier, context=context)
+
+    assert extracted is not None
+
+
+def test_optional_discovery_unsupported_upstream_span_is_not_marked_error() -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    telemetry = GatewayTelemetry(tracer_provider=provider)
+
+    with telemetry.start_upstream_span("context7", "stdio", "resources/templates/list", notification=False):
+        telemetry.annotate_upstream_result(
+            success=False,
+            error={"code": -32601, "message": "Method not found"},
+            expected_unsupported=True,
+        )
+
+    span = exporter.get_finished_spans()[0]
+
+    assert span.status.status_code == StatusCode.OK
+    assert span.attributes["mcp.success"] is False
+    assert span.attributes["mcp.expected_unsupported"] is True

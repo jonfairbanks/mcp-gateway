@@ -25,7 +25,16 @@ upstreams:
     assert config.gateway.allow_unauthenticated is False
     assert config.gateway.bootstrap_admin_api_key == ""
     assert config.gateway.public_tools_catalog is False
+    assert config.gateway.public_metrics is False
+    assert config.gateway.tracing_enabled is False
+    assert config.gateway.readiness_mode == "any"
+    assert config.gateway.required_ready_upstreams == []
+    assert config.gateway.readiness_min_healthy_upstreams is None
+    assert config.gateway.readiness_min_healthy_percent is None
     assert config.logging.extra_redact_fields == []
+    assert config.logging.store_request_bodies is False
+    assert config.logging.store_response_bodies is False
+    assert config.cache.allowed_tools == []
     assert config.upstreams[0].http_serialize_requests is False
 
 
@@ -106,6 +115,25 @@ upstreams:
 
     config = load_config(str(config_file))
     assert config.gateway.public_tools_catalog is True
+
+
+def test_loads_public_metrics_flag(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+  public_metrics: true
+upstreams:
+  - id: "remote"
+    transport: "streamable_http"
+    endpoint: "https://example.com/mcp"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(str(config_file))
+    assert config.gateway.public_metrics is True
 
 
 def test_loads_postgres_auth_mode_and_bootstrap_key(tmp_path) -> None:
@@ -264,3 +292,188 @@ upstreams:
 
     with pytest.raises(ValueError, match=r"upstreams\[github\]\.http_headers must be a mapping"):
         load_config(str(config_file))
+
+
+def test_loads_required_readiness_mode(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+  readiness_mode: "required"
+  required_ready_upstreams:
+    - "github"
+upstreams:
+  - id: "github"
+    transport: "streamable_http"
+    endpoint: "https://example.com/mcp"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(str(config_file))
+    assert config.gateway.readiness_mode == "required"
+    assert config.gateway.required_ready_upstreams == ["github"]
+
+
+def test_rejects_required_readiness_mode_without_required_upstreams(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+  readiness_mode: "required"
+upstreams:
+  - id: "github"
+    transport: "streamable_http"
+    endpoint: "https://example.com/mcp"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="required_ready_upstreams must not be empty"):
+        load_config(str(config_file))
+
+
+def test_rejects_required_readiness_mode_with_unknown_upstream(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+  readiness_mode: "required"
+  required_ready_upstreams:
+    - "missing"
+upstreams:
+  - id: "github"
+    transport: "streamable_http"
+    endpoint: "https://example.com/mcp"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="references unknown upstream"):
+        load_config(str(config_file))
+
+
+def test_rejects_threshold_readiness_mode_without_threshold_config(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+  readiness_mode: "threshold"
+upstreams:
+  - id: "github"
+    transport: "streamable_http"
+    endpoint: "https://example.com/mcp"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="requires gateway.readiness_min_healthy_upstreams or gateway.readiness_min_healthy_percent"):
+        load_config(str(config_file))
+
+
+def test_rejects_streamable_http_upstream_without_endpoint(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+upstreams:
+  - id: "github"
+    transport: "streamable_http"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"upstreams\[github\]\.endpoint is required"):
+        load_config(str(config_file))
+
+
+def test_rejects_stdio_upstream_without_command(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+upstreams:
+  - id: "context7"
+    transport: "stdio"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"upstreams\[context7\]\.command is required"):
+        load_config(str(config_file))
+
+
+def test_rejects_duplicate_upstream_ids(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+upstreams:
+  - id: "github"
+    transport: "streamable_http"
+    endpoint: "https://example.com/one"
+  - id: "github"
+    transport: "streamable_http"
+    endpoint: "https://example.com/two"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Duplicate upstream id"):
+        load_config(str(config_file))
+
+
+def test_rejects_overlapping_tool_routes_across_upstreams(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+upstreams:
+  - id: "github"
+    transport: "streamable_http"
+    endpoint: "https://example.com/github"
+    tool_routes:
+      - "github."
+  - id: "github-admin"
+    transport: "streamable_http"
+    endpoint: "https://example.com/github-admin"
+    tool_routes:
+      - "github.admin."
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Ambiguous overlapping tool routes"):
+        load_config(str(config_file))
+
+
+def test_aggregates_multiple_config_validation_errors(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  api_key: "secret"
+  listen_port: 0
+upstreams:
+  - id: "broken"
+    transport: "streamable_http"
+    timeout_ms: 0
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc:
+        load_config(str(config_file))
+
+    message = str(exc.value)
+    assert "gateway.listen_port must be between 1 and 65535" in message
+    assert "upstreams[broken].endpoint is required when transport is 'streamable_http'" in message
+    assert "upstreams[broken].timeout_ms must be greater than 0" in message
