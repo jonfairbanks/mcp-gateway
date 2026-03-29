@@ -681,6 +681,18 @@ class Gateway:
         event_name = "upstream_process_log"
         base_fields = {"upstream_id": upstream_id, "stream": "stderr", "line": line}
         lowered = line.lower()
+        # Several upstream CLIs (for example mcp-grafana) log human-readable records to
+        # stderr with an explicit severity token like `level=INFO`. Respect that severity
+        # first so INFO lines do not get mislabeled as gateway warnings.
+        if "level=error" in lowered or "level=fatal" in lowered:
+            self._logger.error(event_name, **base_fields)
+            return
+        if "level=warn" in lowered or "level=warning" in lowered:
+            self._logger.warn(event_name, **base_fields)
+            return
+        if "level=info" in lowered:
+            self._logger.info(event_name, **base_fields)
+            return
         error_markers = (" error ", "\terror\t", "fatal", "panic", "exception", "traceback")
         warn_markers = (" warn ", "\twarn\t", "deprecated", "deprecation", "retrying", "rate limit")
         info_markers = (" info ", "\tinfo\t", "running on stdio", "starting stdio server", "initialized")
