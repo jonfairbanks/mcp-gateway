@@ -49,3 +49,12 @@ ignore = ["E501"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+
+[tool.semantic_release]
+branch = "main"
+tag_format = "v{version}"
+commit_message = "chore(release): {version}"
+changelog_file = "CHANGELOG.md"
+upload_to_pypi = false
+version_toml = ["pyproject.toml:project.version"]
+version_variables = ["src/mcp_gateway/__init__.py:__version__"]
