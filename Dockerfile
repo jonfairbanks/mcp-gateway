@@ -39,4 +39,5 @@ USER app:app
 
 EXPOSE 8080
 
-CMD ["mcp-gateway", "serve", "--config", "/app/config.example.yaml"]
+ENTRYPOINT ["mcp-gateway"]
+CMD ["serve", "--config", "/app/config.example.yaml"]

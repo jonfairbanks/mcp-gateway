@@ -60,3 +60,26 @@ The CI workflow runs the same lint and test commands in `.github/workflows/pr-ch
 - Check `README.md` for runtime assumptions before changing startup or config behavior.
 - Check `docs/development.md` before changing test setup or integration-test behavior.
 - If you touch Postgres, auth, or HTTP routing code, add or update tests in the matching area rather than relying only on the full suite.
+
+## Commit Message Conventions
+
+This repository uses automated changelog and release tooling. Commit messages must follow Conventional Commits so version bumps and release notes are generated correctly.
+
+- Format: `<type>(<optional-scope>): <description>`
+- Common types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `build`, `perf`
+- Use `feat` for user-visible features (minor version bump).
+- Use `fix` for bug fixes (patch version bump).
+- For breaking changes, include `!` after type/scope and include a `BREAKING CHANGE:` footer in the body (major version bump).
+- Keep the subject line imperative and concise.
+
+Examples:
+
+- `feat(auth): add per-upstream integration grants`
+- `fix(gateway): handle stderr log levels from stdio upstreams`
+- `feat!: remove legacy http_sse transport`
+
+Breaking-change footer example:
+
+```text
+BREAKING CHANGE: removed support for upstream transport "http_sse"; use "streamable_http".
+```
