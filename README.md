@@ -118,3 +118,20 @@ The checked-in example config is intentionally runnable and enables `context7` b
 - RBAC onboarding: [docs/rbac-onboarding.md](docs/rbac-onboarding.md)
 - Development and testing: [docs/development.md](docs/development.md)
 - Database schema: [schema.sql](schema.sql)
+
+## Automated Releases
+
+This repository includes a GitHub Actions workflow at `.github/workflows/release.yml` that runs on pushes to `main` and on manual dispatch.
+
+The workflow uses `python-semantic-release` to:
+
+- determine version bumps from Conventional Commit messages
+- update `pyproject.toml` and `src/mcp_gateway/__init__.py`
+- create a Git tag and GitHub Release
+- maintain `CHANGELOG.md`
+
+Examples of release-driving commits:
+
+- `fix: handle stderr severity mapping`
+- `feat: add upstream warmup summary endpoint`
+- `feat!: remove legacy transport mode`

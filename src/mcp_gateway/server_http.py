@@ -19,7 +19,7 @@ from .errors import GatewayHTTPError
 from .gateway import Gateway
 from .jsonrpc import make_error_response
 from .logging import Logger
-from .protocol import DEFAULT_HTTP_PROTOCOL_VERSION, is_supported_protocol_version
+from .protocol import DEFAULT_HTTP_PROTOCOL_VERSION, is_supported_protocol_version, negotiate_protocol_version
 from .request_context import AuthenticatedPrincipal, RequestContext
 from .telemetry import GatewayTelemetry
 
@@ -465,15 +465,14 @@ class HttpServer:
             requested_version = params.get("protocolVersion") if isinstance(params, dict) else None
             # `initialize` negotiates protocol version from the JSON-RPC payload.
             # Later requests rely on the transport header instead.
-            if requested_version is not None and not is_supported_protocol_version(requested_version):
-                return None, web.Response(status=400, text="Unsupported initialize.protocolVersion.")
-            if is_supported_protocol_version(requested_version):
-                return requested_version, None
-            return None, None
+            return negotiate_protocol_version(requested_version), None
 
         return header_version or DEFAULT_HTTP_PROTOCOL_VERSION, None
 
     async def health_handler(self, request: web.Request) -> web.Response:
+        return web.json_response({"status": "ok"})
+
+    async def root_handler(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
     async def ready_handler(self, request: web.Request) -> web.Response:
@@ -629,6 +628,7 @@ class HttpServer:
             middlewares=[self._tracing_middleware, self._error_middleware],
         )
         routes = [
+            web.get("/", self.root_handler),
             web.get("/healthz", self.health_handler),
             web.get("/readyz", self.ready_handler),
             web.get("/tools", self.tools_handler),

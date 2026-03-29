@@ -246,9 +246,12 @@ def test_health_and_ready_handlers_return_minimal_public_payloads() -> None:
     gateway._warmup_status = {"notion": {"initialize_success": True, "tools_list_success": True}}
     server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
 
+    root_response = asyncio.run(server.root_handler(_request(headers={})))
     health_response = asyncio.run(server.health_handler(_request(headers={})))
     ready_response = asyncio.run(server.ready_handler(_request(headers={})))
 
+    assert root_response.status == 200
+    assert json.loads(root_response.body.decode("utf-8")) == {"status": "ok"}
     assert health_response.status == 200
     assert json.loads(health_response.body.decode("utf-8")) == {"status": "ok"}
     assert ready_response.status == 200
@@ -1104,6 +1107,7 @@ def test_build_app_exposes_only_runtime_and_self_service_routes() -> None:
     app = server.build_app()
     route_paths = {route.resource.canonical for route in app.router.routes()}
 
+    assert "/" in route_paths
     assert "/v1/me" in route_paths
     assert "/v1/me/api-keys" in route_paths
     assert "/mcp" in route_paths
@@ -1367,7 +1371,7 @@ def test_mcp_post_handler_returns_negotiated_protocol_header_on_initialize() -> 
     assert response.headers["MCP-Protocol-Version"] == CURRENT_PROTOCOL_VERSION
 
 
-def test_mcp_post_handler_rejects_unsupported_initialize_protocol_version() -> None:
+def test_mcp_post_handler_negotiates_unsupported_initialize_protocol_version() -> None:
     config = _config_with_upstreams([_upstream()])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
     server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
@@ -1384,6 +1388,25 @@ def test_mcp_post_handler_rejects_unsupported_initialize_protocol_version() -> N
             },
         }
 
+    async def fake_handle(payload, request_context):
+        return GatewayResult(
+            payload={
+                "jsonrpc": "2.0",
+                "id": payload.get("id"),
+                "result": {
+                    "protocolVersion": CURRENT_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "serverInfo": {"name": "mcp-gateway", "version": "1.0.0"},
+                },
+            },
+            success=True,
+            cache_hit=False,
+            upstream_id=None,
+            tool_name=None,
+            request_id=UUID("00000000-0000-0000-0000-000000000000"),
+        )
+
+    gateway.handle = fake_handle  # type: ignore[method-assign]
     request = SimpleNamespace(
         headers={"Authorization": "Bearer secret"},
         remote="127.0.0.1",
@@ -1392,8 +1415,8 @@ def test_mcp_post_handler_rejects_unsupported_initialize_protocol_version() -> N
 
     response = asyncio.run(server.mcp_post_handler(request))
 
-    assert response.status == 400
-    assert response.text == "Unsupported initialize.protocolVersion."
+    assert response.status == 200
+    assert response.headers["MCP-Protocol-Version"] == CURRENT_PROTOCOL_VERSION
 
 
 def test_mcp_post_handler_rejects_unsupported_protocol_header() -> None:
