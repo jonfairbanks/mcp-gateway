@@ -1190,6 +1190,7 @@ def test_mcp_get_handler_returns_method_not_allowed() -> None:
 
     assert response.status == 405
     assert response.headers["Allow"] == "POST"
+    assert response.text == "This endpoint does not support GET SSE streams."
 
 
 def test_standard_user_cannot_call_tools_without_grants() -> None:
@@ -1364,6 +1365,35 @@ def test_mcp_post_handler_returns_negotiated_protocol_header_on_initialize() -> 
 
     assert response.status == 200
     assert response.headers["MCP-Protocol-Version"] == CURRENT_PROTOCOL_VERSION
+
+
+def test_mcp_post_handler_rejects_unsupported_initialize_protocol_version() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_json():
+        return {
+            "jsonrpc": "2.0",
+            "id": "init-1",
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2099-01-01",
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "1.0.0"},
+            },
+        }
+
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer secret"},
+        remote="127.0.0.1",
+        json=fake_json,
+    )
+
+    response = asyncio.run(server.mcp_post_handler(request))
+
+    assert response.status == 400
+    assert response.text == "Unsupported initialize.protocolVersion."
 
 
 def test_mcp_post_handler_rejects_unsupported_protocol_header() -> None:

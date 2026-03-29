@@ -465,6 +465,8 @@ class HttpServer:
             requested_version = params.get("protocolVersion") if isinstance(params, dict) else None
             # `initialize` negotiates protocol version from the JSON-RPC payload.
             # Later requests rely on the transport header instead.
+            if requested_version is not None and not is_supported_protocol_version(requested_version):
+                return None, web.Response(status=400, text="Unsupported initialize.protocolVersion.")
             if is_supported_protocol_version(requested_version):
                 return requested_version, None
             return None, None
@@ -590,7 +592,7 @@ class HttpServer:
         return web.json_response(revoked)
 
     async def mcp_get_handler(self, request: web.Request) -> web.Response:
-        return web.Response(status=405, headers={"Allow": "POST"}, text="This endpoint does not offer GET SSE streams.")
+        return web.Response(status=405, headers={"Allow": "POST"}, text="This endpoint does not support GET SSE streams.")
 
     async def mcp_delete_handler(self, request: web.Request) -> web.Response:
         return web.Response(status=405, headers={"Allow": "POST"}, text="This endpoint does not support session deletion.")
