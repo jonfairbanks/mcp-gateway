@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -5,14 +6,17 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     nodejs \
     npm \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir uv
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install uv
 
 COPY pyproject.toml README.md /app/
 RUN python - <<'PY' > /tmp/requirements.txt
@@ -24,10 +28,12 @@ with open("/app/pyproject.toml", "rb") as f:
 for dependency in project["dependencies"]:
     print(dependency)
 PY
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r /tmp/requirements.txt
 
 COPY src /app/src
-RUN pip install --no-cache-dir --no-deps .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-deps .
 
 COPY config.example.yaml schema.sql /app/
 
