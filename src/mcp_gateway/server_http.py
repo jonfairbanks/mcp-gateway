@@ -446,7 +446,10 @@ class HttpServer:
         }
 
     def _with_mcp_cors_headers(self, request: web.Request, response: web.Response) -> web.Response:
-        if request.path != "/mcp":
+        # Unit tests call handlers with SimpleNamespace request doubles that may
+        # omit `.path`; treat those direct MCP handler calls as /mcp.
+        request_path = getattr(request, "path", "/mcp")
+        if request_path != "/mcp":
             return response
         for header, value in self._mcp_cors_headers(request).items():
             if header == "Vary":
