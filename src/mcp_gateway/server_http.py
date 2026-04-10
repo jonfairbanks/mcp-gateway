@@ -105,6 +105,21 @@ class HttpServer:
     async def _error_middleware(self, request: web.Request, handler):
         try:
             return await handler(request)
+        except web.HTTPMethodNotAllowed as exc:
+            allowed_methods = sorted(exc.allowed_methods or [])
+            self._logger.warn(
+                "http_method_not_allowed",
+                endpoint=request.path,
+                method=request.method,
+                allowed_methods=allowed_methods,
+                origin=request.headers.get("Origin"),
+                access_control_request_method=request.headers.get("Access-Control-Request-Method"),
+                access_control_request_headers=request.headers.get("Access-Control-Request-Headers"),
+                content_type=request.headers.get("Content-Type"),
+                user_agent=request.headers.get("User-Agent"),
+            )
+            response = web.Response(status=405, headers={"Allow": ", ".join(allowed_methods)}, text="Method Not Allowed")
+            return self._with_mcp_cors_headers(request, response)
         except GatewayHTTPError as exc:
             return self._gateway_http_error_response(request.path, exc)
         except Exception as exc:  # noqa: BLE001
@@ -115,7 +130,8 @@ class HttpServer:
                 error=str(exc) or type(exc).__name__,
             )
             if request.path == "/mcp":
-                return web.json_response(make_error_response(None, -32603, "Internal error"), status=500)
+                response = web.json_response(make_error_response(None, -32603, "Internal error"), status=500)
+                return self._with_mcp_cors_headers(request, response)
             return self._rest_error(500, "InternalError", "Unexpected server error.")
 
     @web.middleware
@@ -409,6 +425,40 @@ class HttpServer:
         return web.json_response(payload, status=status, headers=headers)
 
     @staticmethod
+    def _append_vary_values(existing: Optional[str], additions: str) -> str:
+        merged: set[str] = set()
+        if existing:
+            merged.update(value.strip() for value in existing.split(",") if value.strip())
+        merged.update(value.strip() for value in additions.split(",") if value.strip())
+        return ", ".join(sorted(merged))
+
+    def _mcp_cors_headers(self, request: web.Request) -> Dict[str, str]:
+        origin = request.headers.get("Origin")
+        allow_origin = origin if origin else "*"
+        requested_headers = request.headers.get("Access-Control-Request-Headers")
+        allow_headers = requested_headers or "Authorization, Content-Type, MCP-Protocol-Version"
+        return {
+            "Access-Control-Allow-Origin": allow_origin,
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": allow_headers,
+            "Access-Control-Max-Age": "600",
+            "Vary": "Origin, Access-Control-Request-Method, Access-Control-Request-Headers",
+        }
+
+    def _with_mcp_cors_headers(self, request: web.Request, response: web.Response) -> web.Response:
+        # Unit tests call handlers with SimpleNamespace request doubles that may
+        # omit `.path`; treat those direct MCP handler calls as /mcp.
+        request_path = getattr(request, "path", "/mcp")
+        if request_path != "/mcp":
+            return response
+        for header, value in self._mcp_cors_headers(request).items():
+            if header == "Vary":
+                response.headers["Vary"] = self._append_vary_values(response.headers.get("Vary"), value)
+                continue
+            response.headers.setdefault(header, value)
+        return response
+
+    @staticmethod
     def _is_jsonrpc_response_message(payload: dict[str, Any]) -> bool:
         if payload.get("jsonrpc") != "2.0":
             return False
@@ -591,36 +641,47 @@ class HttpServer:
         return web.json_response(revoked)
 
     async def mcp_get_handler(self, request: web.Request) -> web.Response:
-        return web.Response(status=405, headers={"Allow": "POST"}, text="This endpoint does not support GET SSE streams.")
+        response = web.Response(status=405, headers={"Allow": "POST, OPTIONS"}, text="This endpoint does not support GET SSE streams.")
+        return self._with_mcp_cors_headers(request, response)
 
     async def mcp_delete_handler(self, request: web.Request) -> web.Response:
-        return web.Response(status=405, headers={"Allow": "POST"}, text="This endpoint does not support session deletion.")
+        response = web.Response(status=405, headers={"Allow": "POST, OPTIONS"}, text="This endpoint does not support session deletion.")
+        return self._with_mcp_cors_headers(request, response)
+
+    async def mcp_options_handler(self, request: web.Request) -> web.Response:
+        response = web.Response(status=204, headers={"Allow": "POST, OPTIONS"})
+        return self._with_mcp_cors_headers(request, response)
 
     async def mcp_post_handler(self, request: web.Request) -> web.Response:
         request_context, blocked = await self._preflight_request(request)
         if blocked is not None:
-            return blocked
+            return self._with_mcp_cors_headers(request, blocked)
         assert request_context is not None
         payload, invalid_json = await self._parse_json_request(request)
         if invalid_json is not None:
-            return invalid_json
+            return self._with_mcp_cors_headers(request, invalid_json)
         protocol_version, invalid_protocol = self._effective_protocol_version(request, payload)
         if invalid_protocol is not None:
-            return invalid_protocol
+            return self._with_mcp_cors_headers(request, invalid_protocol)
         if isinstance(payload, list):
-            return await self._handle_batch_message(payload, request_context, protocol_version=protocol_version)
+            response = await self._handle_batch_message(payload, request_context, protocol_version=protocol_version)
+            return self._with_mcp_cors_headers(request, response)
         single_payload, invalid = await self._handle_single_message(payload, request_context)
         if invalid is not None:
-            return invalid
+            return self._with_mcp_cors_headers(request, invalid)
         if single_payload is None:
             if protocol_version is None:
-                return web.Response(status=202)
-            return web.Response(status=202, headers={"MCP-Protocol-Version": protocol_version})
+                return self._with_mcp_cors_headers(request, web.Response(status=202))
+            return self._with_mcp_cors_headers(
+                request,
+                web.Response(status=202, headers={"MCP-Protocol-Version": protocol_version}),
+            )
         if protocol_version is None and isinstance(single_payload, dict):
             result = single_payload.get("result")
             if isinstance(result, dict) and is_supported_protocol_version(result.get("protocolVersion")):
                 protocol_version = result["protocolVersion"]
-        return self._jsonrpc_http_response(single_payload, protocol_version=protocol_version)
+        response = self._jsonrpc_http_response(single_payload, protocol_version=protocol_version)
+        return self._with_mcp_cors_headers(request, response)
 
     def build_app(self) -> web.Application:
         app = web.Application(
@@ -643,6 +704,7 @@ class HttpServer:
                 web.get("/mcp", self.mcp_get_handler),
                 web.post("/mcp", self.mcp_post_handler),
                 web.delete("/mcp", self.mcp_delete_handler),
+                web.options("/mcp", self.mcp_options_handler),
             ]
         )
         app.add_routes(routes)
