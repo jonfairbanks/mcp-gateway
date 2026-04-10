@@ -75,8 +75,12 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=docker-publish-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=docker-publish-${{ matrix.arch }}
+          cache-from: |
+            type=gha,scope=docker-publish-${{ matrix.arch }}
+            type=registry,ref=${{ needs.meta.outputs.image }}:buildcache-${{ matrix.arch }}
+          cache-to: |
+            type=gha,mode=max,scope=docker-publish-${{ matrix.arch }}
+            type=registry,ref=${{ needs.meta.outputs.image }}:buildcache-${{ matrix.arch }},mode=max
 
   publish:
     needs:
