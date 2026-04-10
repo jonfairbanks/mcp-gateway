@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 from uuid import UUID
 
+from aiohttp import web
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -1188,13 +1189,38 @@ def test_mcp_get_handler_returns_method_not_allowed() -> None:
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
     server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
 
-    request = SimpleNamespace()
+    request = SimpleNamespace(path="/mcp", headers={})
 
     response = asyncio.run(server.mcp_get_handler(request))
 
     assert response.status == 405
-    assert response.headers["Allow"] == "POST"
+    assert response.headers["Allow"] == "POST, OPTIONS"
     assert response.text == "This endpoint does not support GET SSE streams."
+    assert response.headers["Access-Control-Allow-Origin"] == "*"
+
+
+def test_mcp_options_handler_returns_cors_preflight_headers() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    request = SimpleNamespace(
+        path="/mcp",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Headers": "authorization,content-type,mcp-protocol-version",
+        },
+    )
+
+    response = asyncio.run(server.mcp_options_handler(request))
+
+    assert response.status == 204
+    assert response.headers["Allow"] == "POST, OPTIONS"
+    assert response.headers["Access-Control-Allow-Origin"] == "http://localhost:3000"
+    assert response.headers["Access-Control-Allow-Methods"] == "POST, OPTIONS"
+    assert response.headers["Access-Control-Allow-Headers"] == "authorization,content-type,mcp-protocol-version"
+    assert response.headers["Access-Control-Max-Age"] == "600"
+    assert "Origin" in response.headers["Vary"]
 
 
 def test_standard_user_cannot_call_tools_without_grants() -> None:
@@ -1512,3 +1538,46 @@ def test_error_middleware_maps_conflicts_to_rest_responses() -> None:
     assert response.status == 409
     payload = json.loads(response.body.decode("utf-8"))
     assert payload == {"error": "Conflict", "message": "A group with that name already exists."}
+
+
+def test_error_middleware_maps_http_method_not_allowed_for_mcp_and_logs_request_shape() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    logger = RecordingLogger()
+    server = HttpServer(config, gateway, logger, GatewayTelemetry())
+
+    async def failing_handler(_request):
+        raise web.HTTPMethodNotAllowed("PUT", ["POST", "OPTIONS"])
+
+    request = SimpleNamespace(
+        path="/mcp",
+        method="PUT",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+            "Content-Type": "application/json",
+            "User-Agent": "llama-cpp-mcp-client",
+        },
+    )
+
+    response = asyncio.run(server._error_middleware(request, failing_handler))
+
+    assert response.status == 405
+    assert response.headers["Allow"] == "OPTIONS, POST"
+    assert response.headers["Access-Control-Allow-Origin"] == "http://localhost:3000"
+    assert logger.warnings == [
+        (
+            "http_method_not_allowed",
+            {
+                "endpoint": "/mcp",
+                "method": "PUT",
+                "allowed_methods": ["OPTIONS", "POST"],
+                "origin": "http://localhost:3000",
+                "access_control_request_method": "POST",
+                "access_control_request_headers": "authorization,content-type",
+                "content_type": "application/json",
+                "user_agent": "llama-cpp-mcp-client",
+            },
+        )
+    ]
