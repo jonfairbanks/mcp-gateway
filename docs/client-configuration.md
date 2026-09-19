@@ -7,7 +7,7 @@ Point MCP clients at the gateway’s `POST /mcp` endpoint and include bearer aut
 ```toml
 [mcp_servers.mcp-gateway]
 url = "http://localhost:8080/mcp"
-http_headers = { "Authorization" = "Bearer change-me" }
+http_headers = { "Authorization" = "Bearer <your-api-key>" }
 ```
 
 ## Claude
@@ -18,7 +18,7 @@ http_headers = { "Authorization" = "Bearer change-me" }
     "mcp-gateway": {
       "url": "http://localhost:8080/mcp",
       "headers": {
-        "Authorization": "Bearer change-me"
+        "Authorization": "Bearer <your-api-key>"
       }
     }
   }
