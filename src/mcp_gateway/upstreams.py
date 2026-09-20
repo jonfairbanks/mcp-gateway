@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import time
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
@@ -27,6 +29,11 @@ class SseEvent:
 
 
 class StreamableHTTPUpstream:
+    MAX_SSE_LINES = 16384
+    MAX_SSE_LINE_BYTES = 1024 * 1024
+    MAX_SSE_EVENTS = 1024
+    MAX_SSE_EVENT_BYTES = 2 * 1024 * 1024
+
     def __init__(
         self,
         endpoint: str,
@@ -34,7 +41,9 @@ class StreamableHTTPUpstream:
         headers: Optional[Dict[str, str]] = None,
         bearer_token_env_var: Optional[str] = None,
         serialize_requests: bool = False,
+        response_max_bytes: int = 8 * 1024 * 1024,
     ) -> None:
+        self._response_max_bytes = response_max_bytes
         self._endpoint = endpoint
         self._timeout = timeout_ms / 1000
         self._headers = headers or {}
@@ -106,13 +115,13 @@ class StreamableHTTPUpstream:
             async with self._session.post(self._endpoint, json=payload, headers=await self._request_headers()) as resp:
                 self._capture_session_headers(resp)
                 if resp.status == 202:
-                    await resp.read()
+                    await self._read_body(resp)
                     return UpstreamResponse(
                         payload={"jsonrpc": "2.0", "id": payload.get("id"), "result": {"accepted": True}},
                         success=True,
                     )
 
-                raw_text = await resp.text()
+                raw_text = await self._read_body(resp)
                 data: Dict[str, Any]
                 if raw_text:
                     try:
@@ -165,29 +174,46 @@ class StreamableHTTPUpstream:
             async with self._session.post(self._endpoint, json=payload, headers=await self._request_headers()) as resp:
                 self._capture_session_headers(resp)
                 if resp.status >= 400:
-                    body = await resp.text()
+                    body = await self._read_body(resp)
                     raise RuntimeError(f"HTTP upstream notify failed status {resp.status}: {body[:300]}")
-                await resp.read()
+                await self._read_body(resp)
+
+    async def _read_body(self, resp: aiohttp.ClientResponse) -> str:
+        # iter_chunked yields decoded bytes, so compressed responses have the same limit.
+        body = bytearray()
+        async for chunk in resp.content.iter_chunked(64 * 1024):
+            if len(body) + len(chunk) > self._response_max_bytes:
+                raise RuntimeError("HTTP upstream response exceeds http_response_max_bytes")
+            body.extend(chunk)
+        return body.decode(resp.charset or "utf-8", errors="replace")
 
     @staticmethod
     def _looks_like_sse(raw_text: str) -> bool:
         stripped = raw_text.lstrip()
         return stripped.startswith("event:") or stripped.startswith("data:") or "\nevent:" in raw_text or "\ndata:" in raw_text
 
-    @staticmethod
-    def _parse_sse_events(raw_text: str) -> list[SseEvent]:
-        events: list[SseEvent] = []
+    @classmethod
+    def _parse_sse_events(cls, raw_text: str) -> Iterator[SseEvent]:
         event_name = "message"
         data_lines: list[str] = []
-        saw_field = False
-
-        for line in raw_text.splitlines():
+        event_bytes = 0
+        event_count = 0
+        line_count = 0
+        # Avoid splitlines() and a second full list of event objects.
+        for raw_line in io.StringIO(raw_text, newline=None):
+            line_count += 1
+            if line_count > cls.MAX_SSE_LINES or len(raw_line.encode("utf-8")) > cls.MAX_SSE_LINE_BYTES:
+                raise RuntimeError("HTTP upstream SSE line limit exceeded")
+            line = raw_line.rstrip("\r\n")
             if not line:
-                if saw_field:
-                    events.append(SseEvent(event=event_name, data="\n".join(data_lines)))
+                if data_lines:
+                    event_count += 1
+                    if event_count > cls.MAX_SSE_EVENTS:
+                        raise RuntimeError("HTTP upstream SSE event limit exceeded")
+                    yield SseEvent(event=event_name, data="\n".join(data_lines))
                 event_name = "message"
                 data_lines = []
-                saw_field = False
+                event_bytes = 0
                 continue
             if line.startswith(":"):
                 continue
@@ -196,15 +222,17 @@ class StreamableHTTPUpstream:
                 continue
             if value.startswith(" "):
                 value = value[1:]
-            saw_field = True
             if field == "event":
                 event_name = value or "message"
             elif field == "data":
+                event_bytes += len(value.encode("utf-8")) + 1
+                if event_bytes > cls.MAX_SSE_EVENT_BYTES:
+                    raise RuntimeError("HTTP upstream SSE event data limit exceeded")
                 data_lines.append(value)
-
-        if saw_field:
-            events.append(SseEvent(event=event_name, data="\n".join(data_lines)))
-        return events
+        if data_lines:
+            if event_count >= cls.MAX_SSE_EVENTS:
+                raise RuntimeError("HTTP upstream SSE event limit exceeded")
+            yield SseEvent(event=event_name, data="\n".join(data_lines))
 
     @classmethod
     def _extract_sse_payload(cls, raw_text: str, expected_id: Any) -> Optional[Dict[str, Any]]:
@@ -256,10 +284,11 @@ class StdioUpstream:
                 return
             if self._process and self._process.returncode is not None:
                 await self._discard_dead_process()
-            merged_env = None
-            if self._env:
-                # Merge custom env vars over process env so PATH and runtime defaults are preserved.
-                merged_env = {**os.environ, **self._env}
+            # Only runtime necessities are inherited. Credentials must be explicitly
+            # assigned to this upstream in its env mapping.
+            inherited = {"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TMP", "TEMP", "SYSTEMROOT", "WINDIR"}
+            merged_env = {name: value for name, value in os.environ.items() if name in inherited}
+            merged_env.update(self._env)
             self._process = await asyncio.create_subprocess_exec(
                 *self._command,
                 stdin=asyncio.subprocess.PIPE,
@@ -307,54 +336,43 @@ class StdioUpstream:
         self._process = None
 
     async def call(self, payload: Dict[str, Any]) -> UpstreamResponse:
-        await self.start()
         async with self._lock:
+            await self.start()
+            assert self._process and self._process.stdin and self._process.stdout
             expected_id = payload.get("id")
             deadline = time.monotonic() + self._timeout
-            for attempt in range(2):
-                if attempt > 0:
-                    await self.start()
-                assert self._process
-                assert self._process.stdin
-                assert self._process.stdout
-                try:
-                    self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
-                    await self._process.stdin.drain()
-                except (BrokenPipeError, ConnectionResetError):
-                    await self._discard_dead_process()
-                    if attempt == 0:
-                        continue
-                    raise RuntimeError("Upstream stdio closed") from None
-
+            try:
+                # Once write begins, a failure leaves the outcome unknown. Never replay
+                # the request; a later independent call may start a fresh process.
+                self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
+                await self._process.stdin.drain()
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise asyncio.TimeoutError()
                     line = await asyncio.wait_for(self._process.stdout.readline(), timeout=remaining)
                     if not line:
-                        await self._discard_dead_process()
-                        if attempt == 0:
-                            break
-                        raise RuntimeError("Upstream stdio closed") from None
+                        raise RuntimeError("Upstream stdio closed; request outcome unknown")
                     data = json.loads(line.decode("utf-8"))
-                    # Stdio upstreams may emit notifications/progress messages between requests.
-                    # Keep reading until we receive the response for this request id.
                     if data.get("id") != expected_id:
                         continue
-                    success = "error" not in data
-                    return UpstreamResponse(payload=data, success=success)
-            raise RuntimeError("Upstream stdio closed")
+                    return UpstreamResponse(payload=data, success="error" not in data)
+            except (BrokenPipeError, ConnectionResetError):
+                await self.close()
+                raise RuntimeError("Upstream stdio closed; request outcome unknown") from None
+            except (RuntimeError, asyncio.TimeoutError, asyncio.CancelledError):
+                await self.close()
+                raise
 
     async def notify(self, payload: Dict[str, Any]) -> None:
-        await self.start()
-        assert self._process
-        assert self._process.stdin
         async with self._lock:
+            await self.start()
+            assert self._process and self._process.stdin
             try:
                 self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
                 await self._process.stdin.drain()
             except (BrokenPipeError, ConnectionResetError):
-                await self._discard_dead_process()
+                await self.close()
                 raise RuntimeError("Upstream stdio closed") from None
 
     async def _stream_stderr(self) -> None:

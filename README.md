@@ -61,6 +61,8 @@ export DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway'
 mcp-gateway serve --config ./config.yaml
 ```
 
+The image includes Context7 installed from `upstreams/package-lock.json`; startup runs the local `context7-mcp` binary without downloading npm packages. For a source checkout, install it once with `npm ci --prefix upstreams --ignore-scripts` and add `$PWD/upstreams/node_modules/.bin` to `PATH` before starting the gateway. Use Node.js 24 LTS.
+
 If a `.env` file is present in the working directory, `mcp-gateway` loads it automatically at startup.
 
 5. Verify the service:
@@ -89,10 +91,7 @@ upstreams:
   - id: "context7"
     name: "Context7 MCP"
     transport: "stdio"
-    command: "npx"
-    args:
-      - "-y"
-      - "@upstash/context7-mcp"
+    command: "context7-mcp"
 
   - id: "github"
     name: "GitHub MCP"

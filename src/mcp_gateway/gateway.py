@@ -232,7 +232,8 @@ class Gateway:
                 if name in seen:
                     continue
                 seen.add(name)
-                merged_tools.append(tool)
+                if name not in upstream.deny_tools:
+                    merged_tools.append(tool)
             upstream_tools[upstream.id] = upstream_tool_names
 
         return ToolRegistryState(
@@ -417,9 +418,9 @@ class Gateway:
     ) -> str:
         normalized = normalize_params(params)
         if tool_name in self._config.cache.globally_shareable_tools:
-            return f"{upstream.id}:{method}:{tool_name}:{normalized}"
+            return f"v2:{upstream.id}:{method}:{tool_name}:{normalized}"
         scoped_subject = scope_key or "anonymous"
-        return f"{upstream.id}:{method}:{tool_name}:scope={scoped_subject}:{normalized}"
+        return f"v2:{upstream.id}:{method}:{tool_name}:scope={scoped_subject}:{normalized}"
 
     def _cache_scope_key(self, request_context: RequestContext) -> str:
         principal = request_context.principal
@@ -979,6 +980,7 @@ class Gateway:
                     headers=upstream.http_headers,
                     bearer_token_env_var=upstream.bearer_token_env_var,
                     serialize_requests=upstream.http_serialize_requests,
+                    response_max_bytes=upstream.http_response_max_bytes,
                 )
                 self._http_upstreams[upstream.id] = client
             return client

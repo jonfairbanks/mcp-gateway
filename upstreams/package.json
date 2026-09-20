@@ -1,0 +1,8 @@
+{
+  "name": "mcp-gateway-upstreams",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@upstash/context7-mcp": "4.1.1"
+  }
+}

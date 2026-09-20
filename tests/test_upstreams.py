@@ -39,12 +39,19 @@ class FakeResponse:
         self.status = status
         self._body = body
         self.headers = headers or {}
+        self.content = self
+        self.charset = None
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         return None
+
+    async def iter_chunked(self, size):
+        body = self._body.encode("utf-8")
+        for offset in range(0, len(body), size):
+            yield body[offset:offset + size]
 
     async def text(self) -> str:
         return self._body

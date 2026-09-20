@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
-import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -20,14 +18,6 @@ from mcp_gateway.telemetry import GatewayTelemetry
 
 FIXTURE_STDIO_UPSTREAM = Path(__file__).resolve().parent / "fixtures" / "fake_stdio_upstream.py"
 SCHEMA_SQL = Path(__file__).resolve().parents[1] / "schema.sql"
-TEST_DATABASE_DSN_ENV = "MCP_GATEWAY_TEST_DATABASE_URL"
-DEFAULT_DATABASE_DSN_ENV = "DATABASE_URL"
-TEST_DATABASE_DSN = os.getenv(TEST_DATABASE_DSN_ENV) or os.getenv(DEFAULT_DATABASE_DSN_ENV)
-
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_DSN,
-    reason=f"set {TEST_DATABASE_DSN_ENV} or {DEFAULT_DATABASE_DSN_ENV} to run Postgres integration tests",
-)
 
 
 def _gateway_config(http_endpoint: str) -> AppConfig:
@@ -97,18 +87,6 @@ async def _prepare_database(store: PostgresStore) -> None:
     assert store._pool is not None
     async with store._pool.connection() as conn:
         await conn.execute(SCHEMA_SQL.read_text(encoding="utf-8"))
-        await conn.execute(
-            """
-            TRUNCATE TABLE
-                mcp_responses,
-                mcp_denials,
-                mcp_requests,
-                mcp_cache,
-                gateway_rate_limits,
-                gateway_access_keys
-            CASCADE
-            """
-        )
 
 
 async def _logged_tool_call_upstreams(store: PostgresStore) -> list[str]:
@@ -136,7 +114,7 @@ async def _logged_counts(store: PostgresStore) -> tuple[int, int]:
     return int(request_row["count"]), int(response_row["count"])
 
 
-def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging() -> None:
+def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging(isolated_database_dsn) -> None:
     async def run_test() -> None:
         http_app = web.Application()
         seen_methods: list[str] = []
@@ -203,8 +181,7 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging()
         http_app.router.add_post("/mcp", upstream_handler)
 
         async with TestServer(http_app) as upstream_server:
-            assert TEST_DATABASE_DSN is not None
-            store = PostgresStore(TEST_DATABASE_DSN)
+            store = PostgresStore(isolated_database_dsn)
             await store.start()
             await _prepare_database(store)
 
@@ -307,7 +284,7 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging()
     asyncio.run(run_test())
 
 
-def test_rate_limits_apply_across_two_gateway_instances_with_shared_postgres() -> None:
+def test_rate_limits_apply_across_two_gateway_instances_with_shared_postgres(isolated_database_dsn) -> None:
     async def run_test() -> None:
         http_app = web.Application()
 
@@ -349,8 +326,7 @@ def test_rate_limits_apply_across_two_gateway_instances_with_shared_postgres() -
         http_app.router.add_post("/mcp", upstream_handler)
 
         async with TestServer(http_app) as upstream_server:
-            assert TEST_DATABASE_DSN is not None
-            dsn = TEST_DATABASE_DSN
+            dsn = isolated_database_dsn
             store_a = PostgresStore(dsn)
             store_b = PostgresStore(dsn)
             await store_a.start()
@@ -395,7 +371,7 @@ def test_rate_limits_apply_across_two_gateway_instances_with_shared_postgres() -
     asyncio.run(run_test())
 
 
-def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> None:
+def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances(isolated_database_dsn) -> None:
     async def run_test() -> None:
         http_app = web.Application()
         tool_call_count = 0
@@ -452,8 +428,7 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> N
         http_app.router.add_post("/mcp", upstream_handler)
 
         async with TestServer(http_app) as upstream_server:
-            assert TEST_DATABASE_DSN is not None
-            dsn = TEST_DATABASE_DSN
+            dsn = isolated_database_dsn
             store_a = PostgresStore(dsn)
             store_b = PostgresStore(dsn)
             await store_a.start()

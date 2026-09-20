@@ -1,5 +1,17 @@
 # syntax=docker/dockerfile:1.7
-FROM python:3.11-slim
+FROM node:24.21.0-bookworm-slim AS upstreams
+WORKDIR /opt/mcp-upstreams
+COPY upstreams/package.json upstreams/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+
+FROM python:3.11-slim-bookworm
+
+COPY --from=upstreams /usr/local/bin/node /usr/local/bin/node
+COPY --from=upstreams /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+COPY --from=upstreams /opt/mcp-upstreams /opt/mcp-upstreams
+ENV PATH="/opt/mcp-upstreams/node_modules/.bin:${PATH}"
 
 WORKDIR /app
 
@@ -11,8 +23,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    nodejs \
-    npm \
     && rm -rf /var/lib/apt/lists/*
 
 RUN --mount=type=cache,target=/root/.cache/pip \

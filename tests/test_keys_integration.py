@@ -1,40 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
 from uuid import uuid4
 
 import pytest
 from psycopg import AsyncConnection
-from psycopg.conninfo import make_conninfo
 
 from mcp_gateway.postgres import PostgresStore
 
 SCHEMA_SQL = (Path(__file__).parents[1] / "schema.sql").read_text(encoding="utf-8")
 MIGRATION_SQL = (Path(__file__).parents[1] / "migrations" / "001_owner_api_keys.sql").read_text(encoding="utf-8")
-TEST_DATABASE_DSN_ENV = "MCP_GATEWAY_TEST_DATABASE_URL"
-DEFAULT_DATABASE_DSN_ENV = "DATABASE_URL"
-TEST_DATABASE_DSN = os.getenv(TEST_DATABASE_DSN_ENV) or os.getenv(DEFAULT_DATABASE_DSN_ENV)
-
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_DSN,
-    reason=f"set {TEST_DATABASE_DSN_ENV} or {DEFAULT_DATABASE_DSN_ENV} to run Postgres integration tests",
-)
-
-
-async def _run_in_isolated_schema(test: Callable[[str], Awaitable[None]]) -> None:
-    assert TEST_DATABASE_DSN is not None
-    schema_name = f"test_keys_{uuid4().hex}"
-    scoped_dsn = make_conninfo(TEST_DATABASE_DSN, options=f"-c search_path={schema_name}")
-    async with await AsyncConnection.connect(TEST_DATABASE_DSN, autocommit=True) as conn:
-        await conn.execute(f"CREATE SCHEMA {schema_name}")
-        try:
-            await test(scoped_dsn)
-        finally:
-            await conn.execute(f"DROP SCHEMA {schema_name} CASCADE")
 
 
 async def _execute(scoped_dsn: str, statement: str, params: tuple[object, ...] = ()) -> None:
@@ -50,7 +27,7 @@ async def _fetchone(scoped_dsn: str, statement: str, params: tuple[object, ...] 
         return row
 
 
-def test_fresh_schema_has_only_owner_key_storage_and_migration_is_a_noop() -> None:
+def test_fresh_schema_has_only_owner_key_storage_and_migration_is_a_noop(isolated_database_dsn) -> None:
     async def run(scoped_dsn: str) -> None:
         await _execute(scoped_dsn, SCHEMA_SQL)
         old_tables = await _fetchone(
@@ -85,10 +62,10 @@ def test_fresh_schema_has_only_owner_key_storage_and_migration_is_a_noop() -> No
         await _execute(scoped_dsn, MIGRATION_SQL)
         assert await _fetchone(scoped_dsn, "SELECT count(*) FROM gateway_access_keys") == (0,)
 
-    asyncio.run(_run_in_isolated_schema(run))
+    asyncio.run(run(isolated_database_dsn))
 
 
-def test_owner_keys_support_lookup_usage_metadata_and_revocation() -> None:
+def test_owner_keys_support_lookup_usage_metadata_and_revocation(isolated_database_dsn) -> None:
     async def run(scoped_dsn: str) -> None:
         await _execute(scoped_dsn, SCHEMA_SQL)
         store = PostgresStore(scoped_dsn)
@@ -127,10 +104,10 @@ def test_owner_keys_support_lookup_usage_metadata_and_revocation() -> None:
         finally:
             await store.close()
 
-    asyncio.run(_run_in_isolated_schema(run))
+    asyncio.run(run(isolated_database_dsn))
 
 
-def test_migration_imports_only_active_admin_keys_without_touching_legacy_rows() -> None:
+def test_migration_imports_only_active_admin_keys_without_touching_legacy_rows(isolated_database_dsn) -> None:
     async def run(scoped_dsn: str) -> None:
         await _execute(
             scoped_dsn,
@@ -214,11 +191,11 @@ def test_migration_imports_only_active_admin_keys_without_touching_legacy_rows()
         await _execute(scoped_dsn, MIGRATION_SQL)
         assert await _fetchone(scoped_dsn, "SELECT is_active, revoked_at IS NOT NULL FROM gateway_access_keys") == (False, True)
 
-    asyncio.run(_run_in_isolated_schema(run))
+    asyncio.run(run(isolated_database_dsn))
 
 
 @pytest.mark.parametrize("state", ["expired", "inactive", "revoked"])
-def test_unusable_owner_keys_cannot_authenticate(state: str) -> None:
+def test_unusable_owner_keys_cannot_authenticate(state: str, isolated_database_dsn) -> None:
     async def run(scoped_dsn: str) -> None:
         await _execute(scoped_dsn, SCHEMA_SQL)
         store = PostgresStore(scoped_dsn)
@@ -238,4 +215,4 @@ def test_unusable_owner_keys_cannot_authenticate(state: str) -> None:
             assert await store.find_api_key("test-prefix") is None
         finally:
             await store.close()
-    asyncio.run(_run_in_isolated_schema(run))
+    asyncio.run(run(isolated_database_dsn))
