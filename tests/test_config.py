@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from mcp_gateway.config import load_config
@@ -251,6 +253,14 @@ gateway:
 
     with pytest.raises(ValueError, match="MCP_GATEWAY_API_KEY"):
         load_config(str(config_file))
+
+
+def test_example_config_requires_api_key_environment_variable(monkeypatch) -> None:
+    monkeypatch.delenv("MCP_GATEWAY_API_KEY", raising=False)
+    example_config = Path(__file__).parents[1] / "config.example.yaml"
+
+    with pytest.raises(ValueError, match="MCP_GATEWAY_API_KEY"):
+        load_config(str(example_config))
 
 
 def test_rejects_non_mapping_env_block(tmp_path) -> None:
