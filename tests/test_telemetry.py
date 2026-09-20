@@ -41,6 +41,34 @@ def test_prometheus_metrics_drop_tool_name_labels_but_keep_upstream_counts() -> 
     assert 'tool_name=' not in rendered
 
 
+def test_prometheus_metrics_bound_attacker_controlled_method_labels() -> None:
+    telemetry = GatewayTelemetry()
+
+    for index in range(100):
+        method = f"extension/attacker-controlled-{index}"
+        telemetry.record_request(method)
+        telemetry.record_response(method, False, False, 1, None, None)
+        telemetry.record_upstream_outcome("configured-upstream", method, False)
+
+    rendered = telemetry.render_prometheus().decode("utf-8")
+
+    assert 'mcp_gateway_requests_total{method="other"} 100.0' in rendered
+    assert rendered.count('mcp_gateway_requests_total{method="other"}') == 1
+    assert 'mcp_gateway_responses_total{cache_hit="false",method="other",success="false",upstream_id="none"} 100.0' in rendered
+    assert 'mcp_gateway_upstream_calls_total{method="other",success="false",upstream_id="configured-upstream"} 100.0' in rendered
+    assert "attacker-controlled" not in rendered
+
+
+def test_prometheus_metrics_preserve_known_method_labels() -> None:
+    telemetry = GatewayTelemetry()
+
+    telemetry.record_request("tools/list")
+
+    rendered = telemetry.render_prometheus().decode("utf-8")
+
+    assert 'mcp_gateway_requests_total{method="tools/list"} 1.0' in rendered
+
+
 def test_tracing_stays_disabled_without_otel_env(monkeypatch) -> None:
     monkeypatch.delenv("OTEL_TRACES_EXPORTER", raising=False)
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
