@@ -4,18 +4,12 @@ import asyncio
 import html
 import json
 import time
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from aiohttp import web
 
-from .auth import (
-    AUTH_MODE_POSTGRES_API_KEYS,
-    VALID_ROLES,
-    AuthUnavailableError,
-)
+from .auth import AuthUnavailableError
 from .config import AppConfig
-from .errors import GatewayHTTPError
 from .gateway import Gateway
 from .jsonrpc import make_error_response
 from .logging import Logger
@@ -44,65 +38,6 @@ class HttpServer:
         payload.update(fields)
         return web.json_response(payload, status=status)
 
-    def _management_unavailable_response(self) -> web.Response:
-        return self._rest_error(
-            400,
-            "Unavailable",
-            "Management APIs require gateway.auth_mode to be postgres_api_keys.",
-        )
-
-    def _legacy_management_unavailable_response(self) -> web.Response:
-        return self._rest_error(
-            400,
-            "Unavailable",
-            "API-key management requires gateway.auth_mode to be postgres_api_keys.",
-        )
-
-    def _require_postgres_management(self) -> Optional[web.Response]:
-        if self._gateway.auth_mode_requires_database():
-            return None
-        return self._management_unavailable_response()
-
-    def _require_legacy_api_key_management(self) -> Optional[web.Response]:
-        if self._config.gateway.auth_mode == AUTH_MODE_POSTGRES_API_KEYS:
-            return None
-        return self._legacy_management_unavailable_response()
-
-    def _rest_forbidden(self, message: str) -> web.Response:
-        return self._rest_error(403, "Forbidden", message)
-
-    def _invalid_request_response(
-        self,
-        endpoint: str,
-        message: str,
-        **fields: Any,
-    ) -> web.Response:
-        return self._rest_error(400, "InvalidRequest", message)
-
-    def _log_invalid_request_exception(self, endpoint: str, exc: BaseException, **fields: Any) -> None:
-        self._logger.warn(
-            "http_invalid_request",
-            endpoint=endpoint,
-            error_type=type(exc).__name__,
-            error=str(exc) or type(exc).__name__,
-            **fields,
-        )
-
-    def _log_http_error_exception(self, endpoint: str, exc: GatewayHTTPError) -> None:
-        log_method = self._logger.warn if exc.status < 500 else self._logger.error
-        log_method(
-            "http_service_error",
-            endpoint=endpoint,
-            status=exc.status,
-            error=exc.error,
-            message=exc.message,
-            **exc.fields,
-        )
-
-    def _gateway_http_error_response(self, endpoint: str, exc: GatewayHTTPError) -> web.Response:
-        self._log_http_error_exception(endpoint, exc)
-        return self._rest_error(exc.status, exc.error, exc.message, **exc.fields)
-
     @web.middleware
     async def _error_middleware(self, request: web.Request, handler):
         try:
@@ -122,8 +57,8 @@ class HttpServer:
             )
             response = web.Response(status=405, headers={"Allow": ", ".join(allowed_methods)}, text="Method Not Allowed")
             return self._with_mcp_cors_headers(request, response)
-        except GatewayHTTPError as exc:
-            return self._gateway_http_error_response(request.path, exc)
+        except web.HTTPException:
+            raise
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
                 "http_unhandled_exception",
@@ -148,71 +83,15 @@ class HttpServer:
             self._telemetry.annotate_http_response(response.status)
             return response
 
-    def _normalize_role(self, role: str) -> Optional[str]:
-        normalized_role = role.strip().lower()
-        if normalized_role not in VALID_ROLES:
-            return None
-        return normalized_role
-
-    async def _require_platform_permission(
-        self,
-        request_context: RequestContext,
-        endpoint: str,
-        permission: str,
-    ) -> Optional[web.Response]:
-        allowed = await self._gateway.authorize_platform(request_context.principal, permission)
-        if allowed:
-            return None
-        return self._forbidden_response(endpoint, permission)
-
-    async def _parse_rest_json(self, request: web.Request) -> tuple[Optional[Dict[str, Any]], Optional[web.Response]]:
-        payload, invalid_json = await self._parse_json_request(request)
-        if invalid_json is not None:
-            return None, invalid_json
-        if not isinstance(payload, dict):
-            return None, self._rest_error(400, "InvalidRequest", "Expected a JSON object body.")
-        return payload, None
-
-    def _parse_iso_datetime(self, value: Any, field_name: str) -> Optional[datetime]:
-        if value is None:
-            return None
-        if not isinstance(value, str):
-            raise ValueError(f"{field_name} must be an ISO-8601 string or null")
-        normalized = value.strip()
-        if not normalized:
-            return None
-        try:
-            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ValueError(f"{field_name} must be a valid ISO-8601 timestamp") from exc
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
-
-    def _principal_profile(
-        self,
-        request_context: RequestContext,
-        *,
-        user: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    def _principal_profile(self, request_context: RequestContext) -> Dict[str, Any]:
         principal = request_context.principal
         assert principal is not None
-        payload = {
+        return {
             "subject": principal.subject,
-            "issuer": principal.issuer,
-            "display_name": principal.display_name,
-            "email": principal.email,
-            "groups": list(principal.group_names),
-            "role": principal.role,
             "auth_scheme": principal.auth_scheme,
-            "user_id": principal.user_id,
             "api_key_id": principal.api_key_id,
-            "legacy_api_key_id": principal.legacy_api_key_id,
-            "is_bootstrap_admin": principal.is_bootstrap_admin,
+            "key_name": principal.key_name,
         }
-        if user is not None:
-            payload["user"] = user
-        return payload
 
     async def _authenticate(
         self,
@@ -286,22 +165,6 @@ class HttpServer:
             headers=headers,
         )
 
-    def _forbidden_response(self, endpoint: str, permission: Optional[str] = None) -> web.Response:
-        message = "Blocked by gateway policy: permission not allowed"
-        data = {"category": "policy_denied", "endpoint": endpoint, "retryable": False}
-        if permission is not None:
-            data["permission"] = permission
-            message = f"Blocked by gateway policy: permission '{permission}' not allowed"
-        return web.json_response(
-            make_error_response(
-                None,
-                -32001,
-                message,
-                data=data,
-            ),
-            status=403,
-        )
-
     def _trusted_proxy(self, request: web.Request) -> bool:
         trusted = set(self._config.gateway.trusted_proxies)
         remote = request.remote or ""
@@ -337,8 +200,6 @@ class HttpServer:
         if principal is not None:
             if principal.api_key_id:
                 return f"api_key:{principal.api_key_id}"
-            if principal.user_id:
-                return f"user:{principal.user_id}"
             return f"subject:{principal.auth_scheme}:{principal.subject}"
         return f"client:{request_context.client_id or 'anonymous'}"
 
@@ -568,95 +429,11 @@ class HttpServer:
         return web.Response(body=body, headers={"Content-Type": self._telemetry.prometheus_content_type})
 
     async def me_handler(self, request: web.Request) -> web.Response:
-        unavailable = self._require_postgres_management()
-        if unavailable is not None:
-            return unavailable
         request_context, blocked = await self._preflight_request(request, endpoint="/v1/me", strict_auth=True)
         if blocked is not None:
             return blocked
         assert request_context is not None
-        user = None
-        if request_context.principal and request_context.principal.user_id:
-            user = await self._gateway.get_user_by_id(request_context.principal.user_id)
-        return web.json_response(self._principal_profile(request_context, user=user))
-
-    async def my_api_keys_list_handler(self, request: web.Request) -> web.Response:
-        unavailable = self._require_legacy_api_key_management()
-        if unavailable is not None:
-            return unavailable
-        request_context, blocked = await self._preflight_request(request, endpoint="/v1/me/api-keys", strict_auth=True)
-        if blocked is not None:
-            return blocked
-        assert request_context is not None
-        principal = request_context.principal
-        assert principal is not None
-        if not principal.user_id:
-            return self._rest_error(400, "InvalidPrincipal", "This principal is not linked to a managed user.")
-        items = await self._gateway.list_api_keys(user_id=principal.user_id)
-        return web.json_response({"items": items})
-
-    async def my_api_keys_create_handler(self, request: web.Request) -> web.Response:
-        unavailable = self._require_legacy_api_key_management()
-        if unavailable is not None:
-            return unavailable
-        request_context, blocked = await self._preflight_request(request, endpoint="/v1/me/api-keys", strict_auth=True)
-        if blocked is not None:
-            return blocked
-        assert request_context is not None
-        principal = request_context.principal
-        assert principal is not None
-        if not principal.user_id:
-            return self._rest_error(400, "InvalidPrincipal", "This principal is not linked to a managed user.")
-        body, invalid_body = await self._parse_rest_json(request)
-        if invalid_body is not None:
-            return invalid_body
-        assert body is not None
-        label = body.get("label", "default")
-        if not isinstance(label, str) or not label.strip():
-            return self._rest_error(400, "InvalidRequest", "label must be a non-empty string.")
-        try:
-            expires_at = self._parse_iso_datetime(body.get("expires_at"), "expires_at")
-        except ValueError as exc:
-            self._log_invalid_request_exception("/v1/me/api-keys", exc, field="expires_at")
-            return self._invalid_request_response(
-                "/v1/me/api-keys",
-                "expires_at must be a valid ISO-8601 timestamp",
-                field="expires_at",
-            )
-        try:
-            issued = await self._gateway.issue_api_key_for_user(
-                user_id=principal.user_id,
-                key_name=label.strip(),
-                expires_at=expires_at,
-            )
-        except ValueError as exc:
-            self._log_invalid_request_exception("/v1/me/api-keys", exc, operation="issue_api_key_for_user")
-            return self._invalid_request_response(
-                "/v1/me/api-keys",
-                "Unable to issue API key for this request.",
-                operation="issue_api_key_for_user",
-            )
-        return web.json_response(issued, status=201)
-
-    async def my_api_keys_revoke_handler(self, request: web.Request) -> web.Response:
-        unavailable = self._require_legacy_api_key_management()
-        if unavailable is not None:
-            return unavailable
-        request_context, blocked = await self._preflight_request(request, endpoint="/v1/me/api-keys", strict_auth=True)
-        if blocked is not None:
-            return blocked
-        assert request_context is not None
-        principal = request_context.principal
-        assert principal is not None
-        if not principal.user_id:
-            return self._rest_error(400, "InvalidPrincipal", "This principal is not linked to a managed user.")
-        api_key_id = request.match_info.get("key_id", "").strip()
-        if not api_key_id:
-            return self._rest_error(400, "InvalidRequest", "key_id is required.")
-        revoked = await self._gateway.revoke_api_key(api_key_id, user_id=principal.user_id)
-        if revoked is None:
-            return self._rest_error(404, "NotFound", "API key not found.")
-        return web.json_response(revoked)
+        return web.json_response(self._principal_profile(request_context))
 
     async def mcp_get_handler(self, request: web.Request) -> web.Response:
         response = web.Response(status=405, headers={"Allow": "POST, OPTIONS"}, text="This endpoint does not support GET SSE streams.")
@@ -726,9 +503,6 @@ class HttpServer:
             web.get("/tools", self.tools_handler),
             web.get("/metrics", self.metrics_handler),
             web.get("/v1/me", self.me_handler),
-            web.get("/v1/me/api-keys", self.my_api_keys_list_handler),
-            web.post("/v1/me/api-keys", self.my_api_keys_create_handler),
-            web.delete("/v1/me/api-keys/{key_id}", self.my_api_keys_revoke_handler),
         ]
         routes.extend(
             [

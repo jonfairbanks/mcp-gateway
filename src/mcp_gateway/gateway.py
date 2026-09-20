@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional, Tuple
 from uuid import UUID, uuid4
 
 from .auth import AuthService
-from .authorization import AuthorizationService
 from .cache import TTLCache
 from .config import AppConfig, UpstreamConfig
 from .jsonrpc import make_error_response, normalize_params
@@ -94,7 +93,6 @@ class Gateway:
         self._logger = logger
         self._telemetry = telemetry
         self._auth = AuthService(config, store, logger)
-        self._authorization = AuthorizationService(config, store)
         self._routes = build_routes(config.upstreams)
         self._memory_cache = TTLCache(config.cache.max_entries)
         self._http_upstreams: Dict[str, StreamableHTTPUpstream] = {}
@@ -137,7 +135,6 @@ class Gateway:
         self._runtime.global_breaker = value
 
     async def close(self) -> None:
-        await self._auth.close()
         for client in self._http_upstreams.values():
             await client.close()
         for client in self._stdio_upstreams.values():
@@ -167,148 +164,8 @@ class Gateway:
     def auth_required(self) -> bool:
         return self._auth.auth_required()
 
-    def auth_mode_requires_database(self) -> bool:
-        return self._auth.auth_mode_requires_database()
-
-    async def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
-        return await self._auth.get_user_by_id(user_id)
-
-    async def list_users(self) -> list[Dict[str, Any]]:
-        return await self._auth.list_users()
-
-    async def create_user(self, *, subject: str, display_name: Optional[str], role: Optional[str]) -> Optional[Dict[str, Any]]:
-        return await self._auth.create_user(subject=subject, display_name=display_name, role=role)
-
-    async def update_user(
-        self,
-        user_id: str,
-        *,
-        display_name: Optional[str] = None,
-        role: Optional[str] = None,
-        role_provided: bool = False,
-        is_active: Optional[bool] = None,
-    ) -> Optional[Dict[str, Any]]:
-        return await self._auth.update_user(
-            user_id,
-            display_name=display_name,
-            role=role,
-            role_provided=role_provided,
-            is_active=is_active,
-        )
-
-    async def list_api_keys(self, *, user_id: str) -> list[Dict[str, Any]]:
-        return await self._auth.list_api_keys(user_id=user_id)
-
-    async def list_identities(self) -> list[Dict[str, Any]]:
-        return await self._auth.list_identities()
-
-    async def put_identity(
-        self,
-        *,
-        subject: str,
-        display_name: Optional[str] = None,
-        email: Optional[str] = None,
-        is_active: bool = True,
-    ) -> Dict[str, Any]:
-        return await self._auth.put_identity(
-            subject,
-            display_name=display_name,
-            email=email,
-            is_active=is_active,
-        )
-
-    async def patch_identity(
-        self,
-        subject: str,
-        *,
-        display_name: Optional[str] = None,
-        email: Optional[str] = None,
-        is_active: Optional[bool] = None,
-    ) -> Optional[Dict[str, Any]]:
-        return await self._auth.patch_identity(
-            subject,
-            display_name=display_name,
-            email=email,
-            is_active=is_active,
-        )
-
-    async def issue_api_key_for_user(
-        self,
-        *,
-        user_id: str,
-        key_name: str,
-        expires_at: Optional[Any] = None,
-    ) -> Dict[str, Optional[str]]:
-        return await self._auth.issue_api_key_for_user(user_id=user_id, key_name=key_name, expires_at=expires_at)
-
-    async def revoke_api_key(self, api_key_id: str, *, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        return await self._auth.revoke_api_key(api_key_id, user_id=user_id)
-
-    async def list_groups(self) -> list[Dict[str, Any]]:
-        return await self._auth.list_groups()
-
-    async def create_group(self, *, name: str, description: Optional[str]) -> Optional[Dict[str, Any]]:
-        return await self._auth.create_group(name=name, description=description)
-
-    async def update_group(
-        self,
-        group_id: str,
-        *,
-        name: Optional[str] = None,
-        description: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
-        return await self._auth.update_group(group_id, name=name, description=description)
-
-    async def delete_group(self, group_id: str) -> bool:
-        return await self._auth.delete_group(group_id)
-
-    async def add_group_member(self, group_id: str, *, subject: str) -> Dict[str, Any]:
-        return await self._auth.add_group_member(group_id, subject=subject)
-
-    async def remove_group_member(self, group_id: str, *, subject: str) -> bool:
-        return await self._auth.remove_group_member(group_id, subject=subject)
-
-    async def list_group_integration_grants(self, group_id: str) -> list[Dict[str, Any]]:
-        return await self._auth.list_group_integration_grants(group_id)
-
-    async def add_group_integration_grant(self, group_id: str, *, upstream_id: str) -> Dict[str, Any]:
-        if upstream_id not in self._upstream_by_id:
-            raise ValueError("upstream_id is not configured")
-        return await self._auth.add_group_integration_grant(group_id, upstream_id=upstream_id)
-
-    async def remove_group_integration_grant(self, group_id: str, *, upstream_id: str) -> bool:
-        return await self._auth.remove_group_integration_grant(group_id, upstream_id=upstream_id)
-
-    async def list_group_platform_grants(self, group_id: str) -> list[Dict[str, Any]]:
-        return await self._auth.list_group_platform_grants(group_id)
-
-    async def add_group_platform_grant(self, group_id: str, *, permission: str) -> Dict[str, Any]:
-        return await self._auth.add_group_platform_grant(group_id, permission=permission)
-
-    async def remove_group_platform_grant(self, group_id: str, *, permission: str) -> bool:
-        return await self._auth.remove_group_platform_grant(group_id, permission=permission)
-
-    async def authorize_platform(self, principal: Optional[AuthenticatedPrincipal], permission: str) -> bool:
-        return await self._authorization.authorize_platform(principal, permission)
-
-    async def authorize_integration(self, principal: Optional[AuthenticatedPrincipal], upstream_id: str) -> bool:
-        return await self._authorization.authorize_integration(principal, upstream_id)
-
     async def list_integrations(self) -> list[Dict[str, Any]]:
         return [{"id": upstream.id, "name": upstream.name} for upstream in self._config.upstreams]
-
-    async def usage_summary(
-        self,
-        *,
-        group_by: str,
-        from_timestamp: Optional[Any] = None,
-        to_timestamp: Optional[Any] = None,
-    ) -> list[Dict[str, Any]]:
-        return await self._auth.usage_summary(
-            group_by=group_by,
-            from_timestamp=from_timestamp,
-            to_timestamp=to_timestamp,
-        )
 
     def _redact_for_storage(self, value: Any) -> Any:
         if isinstance(value, dict):
@@ -438,13 +295,9 @@ class Gateway:
                 upstream_id=upstream_id,
                 tool_name=tool_name,
                 client_id=request_context.client_id,
-                auth_user_id=principal.user_id if principal else None,
                 auth_api_key_id=principal.api_key_id if principal else None,
-                auth_role=principal.role if principal else None,
                 auth_subject=principal.subject if principal else None,
                 auth_scheme=principal.auth_scheme if principal else None,
-                auth_group_names=list(principal.group_names) if principal else [],
-                authorized_upstream_id=upstream_id,
                 cache_key=cache_key,
             )
         except Exception as exc:  # noqa: BLE001
@@ -573,8 +426,6 @@ class Gateway:
         if principal is not None:
             if principal.api_key_id:
                 return f"api_key:{principal.api_key_id}"
-            if principal.user_id:
-                return f"user:{principal.user_id}"
             return f"subject:{principal.auth_scheme}:{principal.subject}"
         return f"client:{request_context.client_id or 'anonymous'}"
 
@@ -945,8 +796,6 @@ class Gateway:
             client_id=request_context.client_id,
             auth_subject=principal.subject if principal else None,
             auth_scheme=principal.auth_scheme if principal else None,
-            auth_role=principal.role if principal else None,
-            auth_groups=list(principal.group_names) if principal else [],
             cache_key=cache_key,
         )
 
@@ -1455,45 +1304,20 @@ class Gateway:
                     },
                 )
 
-            if request_context.principal is not None or self.auth_required():
-                authorized = await self.authorize_integration(request_context.principal, routed.upstream.id)
-                if not authorized:
-                    principal = request_context.principal
-                    denial_reason = (
-                        f"Principal '{principal.subject if principal else 'anonymous'}' is not allowed to call "
-                        f"integration '{routed.upstream.id}'"
-                    )
-                    denial_payload = make_error_response(
-                        routed.payload.get("id"),
-                        -32001,
-                        "Blocked by gateway policy: integration not allowed",
-                        data={
-                            "category": "policy_denied",
-                            "enforcer": "pycasbin",
-                            "subject": principal.subject if principal else None,
-                            "upstream_id": routed.upstream.id,
-                            "tool_name": routed.tool_name,
-                            "retryable": False,
-                            "suggestion": "Use an allowed integration grant or contact gateway admin to update access.",
-                        },
-                    )
-                    denial_id = uuid4()
-                    await self._safe_log_denial(denial_id, request_id, routed.upstream.id, routed.tool_name, denial_reason)
-                    self._telemetry.record_denial(routed.upstream.id, routed.tool_name)
-                    return await self._finalize_request(
-                        request_id=request_id,
-                        method=method,
-                        response_payload=denial_payload,
-                        success=False,
-                        cache_hit=False,
-                        latency_ms=0,
-                        upstream_id=routed.upstream.id,
-                        tool_name=routed.tool_name,
-                        log_response=False,
-                        event_name="mcp_denied",
-                        error=denial_payload.get("error"),
-                        extra_log_fields={"reason": denial_reason},
-                    )
+            if request_context.principal is None and self.auth_required():
+                error_payload = make_error_response(routed.payload.get("id"), -32010, "Unauthorized")
+                return await self._finalize_request(
+                    request_id=request_id,
+                    method=method,
+                    response_payload=error_payload,
+                    success=False,
+                    cache_hit=False,
+                    latency_ms=0,
+                    upstream_id=routed.upstream.id,
+                    tool_name=routed.tool_name,
+                    log_response=False,
+                    error=error_payload["error"],
+                )
 
             denial_reason = self._deny(routed.upstream, routed.tool_name)
             if denial_reason:
