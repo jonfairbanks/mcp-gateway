@@ -155,11 +155,13 @@ class Gateway:
         scope_key: str,
         limit: int,
         window_seconds: int = 60,
+        cost: int = 1,
     ) -> dict[str, int | bool]:
         return await self._store.consume_rate_limit(
             scope_key=scope_key,
             limit=limit,
             window_seconds=window_seconds,
+            cost=cost,
         )
 
     def auth_required(self) -> bool:
