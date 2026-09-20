@@ -387,6 +387,11 @@ class HttpServer:
                 )
         return await self._fallback_rate_limit(scope_key, cost=cost)
 
+    async def _pre_auth_rate_limit(self, client_id: str) -> Optional[web.Response]:
+        # Authentication can require a database lookup, so enforce this limit locally
+        # before allowing untrusted credentials to reach the authentication backend.
+        return await self._fallback_rate_limit(f"pre_auth:client:{client_id}")
+
     async def _preflight_request(
         self,
         request: web.Request,
@@ -395,6 +400,11 @@ class HttpServer:
         require_auth: bool = True,
         strict_auth: bool = False,
     ) -> tuple[Optional[RequestContext], Optional[web.Response]]:
+        client_id = self._client_id(request)
+        blocked = await self._pre_auth_rate_limit(client_id)
+        if blocked is not None:
+            return None, blocked
+
         principal: Optional[AuthenticatedPrincipal] = None
         require_auth = require_auth or strict_auth
         if require_auth:
@@ -408,7 +418,6 @@ class HttpServer:
                 principal, unauthorized = await self._authenticate(request, require_principal=strict_auth)
             if unauthorized is not None:
                 return None, unauthorized
-        client_id = self._client_id(request)
         request_context = RequestContext(client_id=client_id, principal=principal)
         blocked = await self._rate_limit(request_context)
         if blocked is not None:

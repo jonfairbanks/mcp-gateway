@@ -1100,6 +1100,31 @@ def test_preflight_request_rejects_unauthorized_requests() -> None:
     assert response.status == 401
 
 
+def test_preflight_request_rate_limits_client_before_repeated_authentication() -> None:
+    config = _config_with_upstreams([_upstream()])
+    config.gateway.rate_limit_per_minute = 1
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+    authentication_attempts = 0
+
+    async def reject_authentication(request, *, require_principal=False):
+        nonlocal authentication_attempts
+        authentication_attempts += 1
+        return None, web.Response(status=401)
+
+    server._authenticate = reject_authentication  # type: ignore[method-assign]
+    request = SimpleNamespace(headers={"Authorization": "Bearer invalid"}, remote="127.0.0.1")
+
+    _, first_response = asyncio.run(server._preflight_request(request))
+    _, second_response = asyncio.run(server._preflight_request(request))
+
+    assert first_response is not None
+    assert first_response.status == 401
+    assert second_response is not None
+    assert second_response.status == 429
+    assert authentication_attempts == 1
+
+
 def test_build_app_exposes_only_runtime_and_self_service_routes() -> None:
     config = _config_with_upstreams([_upstream()])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
