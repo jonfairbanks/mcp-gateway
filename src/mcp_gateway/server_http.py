@@ -23,6 +23,8 @@ from .protocol import DEFAULT_HTTP_PROTOCOL_VERSION, is_supported_protocol_versi
 from .request_context import AuthenticatedPrincipal, RequestContext
 from .telemetry import GatewayTelemetry
 
+MAX_JSONRPC_BATCH_SIZE = 100
+
 
 class HttpServer:
     def __init__(self, config: AppConfig, gateway: Gateway, logger: Logger, telemetry: GatewayTelemetry) -> None:
@@ -340,8 +342,9 @@ class HttpServer:
             return f"subject:{principal.auth_scheme}:{principal.subject}"
         return f"client:{request_context.client_id or 'anonymous'}"
 
-    async def _fallback_rate_limit(self, scope_key: str) -> Optional[web.Response]:
+    async def _fallback_rate_limit(self, scope_key: str, *, cost: int = 1) -> Optional[web.Response]:
         limit = max(1, self._config.gateway.rate_limit_per_minute)
+        cost = max(1, cost)
         now = time.monotonic()
         async with self._rate_limit_lock:
             self._prune_rate_limit_state(now)
@@ -349,7 +352,7 @@ class HttpServer:
             if now - window_start >= 60:
                 window_start = now
                 count = 0
-            count += 1
+            count += cost
             self._rate_limit_state[scope_key] = (window_start, count)
             if count <= limit:
                 return None
@@ -360,12 +363,18 @@ class HttpServer:
             headers={"Retry-After": str(retry_after)},
         )
 
-    async def _rate_limit(self, request_context: RequestContext) -> Optional[web.Response]:
+    async def _rate_limit(self, request_context: RequestContext, *, cost: int = 1) -> Optional[web.Response]:
         scope_key = self._rate_limit_scope_key(request_context)
         limit = max(1, self._config.gateway.rate_limit_per_minute)
+        cost = max(1, cost)
         if self._gateway.store_available():
             try:
-                result = await self._gateway.consume_rate_limit(scope_key=scope_key, limit=limit, window_seconds=60)
+                result = await self._gateway.consume_rate_limit(
+                    scope_key=scope_key,
+                    limit=limit,
+                    window_seconds=60,
+                    cost=cost,
+                )
             except Exception as exc:  # noqa: BLE001
                 self._logger.warn("rate_limit_store_unavailable", scope_key=scope_key, error=str(exc))
             else:
@@ -376,7 +385,12 @@ class HttpServer:
                     status=429,
                     headers={"Retry-After": str(int(result["retry_after_seconds"]))},
                 )
-        return await self._fallback_rate_limit(scope_key)
+        return await self._fallback_rate_limit(scope_key, cost=cost)
+
+    async def _pre_auth_rate_limit(self, client_id: str) -> Optional[web.Response]:
+        # Authentication can require a database lookup, so enforce this limit locally
+        # before allowing untrusted credentials to reach the authentication backend.
+        return await self._fallback_rate_limit(f"pre_auth:client:{client_id}")
 
     async def _preflight_request(
         self,
@@ -386,6 +400,11 @@ class HttpServer:
         require_auth: bool = True,
         strict_auth: bool = False,
     ) -> tuple[Optional[RequestContext], Optional[web.Response]]:
+        client_id = self._client_id(request)
+        blocked = await self._pre_auth_rate_limit(client_id)
+        if blocked is not None:
+            return None, blocked
+
         principal: Optional[AuthenticatedPrincipal] = None
         require_auth = require_auth or strict_auth
         if require_auth:
@@ -399,7 +418,6 @@ class HttpServer:
                 principal, unauthorized = await self._authenticate(request, require_principal=strict_auth)
             if unauthorized is not None:
                 return None, unauthorized
-        client_id = self._client_id(request)
         request_context = RequestContext(client_id=client_id, principal=principal)
         blocked = await self._rate_limit(request_context)
         if blocked is not None:
@@ -660,10 +678,23 @@ class HttpServer:
         payload, invalid_json = await self._parse_json_request(request)
         if invalid_json is not None:
             return self._with_mcp_cors_headers(request, invalid_json)
+        if isinstance(payload, list):
+            if len(payload) > MAX_JSONRPC_BATCH_SIZE:
+                response = self._jsonrpc_http_response(
+                    make_error_response(None, -32600, "JSON-RPC batch is too large"),
+                    status=400,
+                )
+                return self._with_mcp_cors_headers(request, response)
         protocol_version, invalid_protocol = self._effective_protocol_version(request, payload)
         if invalid_protocol is not None:
             return self._with_mcp_cors_headers(request, invalid_protocol)
         if isinstance(payload, list):
+            if len(payload) > 1:
+                # Preflight already charged for the first message. Reserve the
+                # remainder atomically before dispatching any batch work.
+                blocked = await self._rate_limit(request_context, cost=len(payload) - 1)
+                if blocked is not None:
+                    return self._with_mcp_cors_headers(request, blocked)
             response = await self._handle_batch_message(payload, request_context, protocol_version=protocol_version)
             return self._with_mcp_cors_headers(request, response)
         single_payload, invalid = await self._handle_single_message(payload, request_context)

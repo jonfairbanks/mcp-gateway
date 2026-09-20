@@ -156,7 +156,7 @@ gateway:
   listen_host: "0.0.0.0"
   listen_port: 8080
   auth_mode: "single_shared"
-  api_key: "${MCP_GATEWAY_API_KEY:-change-me}"
+  api_key: "${MCP_GATEWAY_API_KEY}"
   bootstrap_admin_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY:-}"
   allow_unauthenticated: false
   public_tools_catalog: false
