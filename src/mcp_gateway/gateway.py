@@ -1453,7 +1453,7 @@ class Gateway:
                     },
                 )
 
-            if method == "tools/call" and (request_context.principal is not None or self.auth_required()):
+            if request_context.principal is not None or self.auth_required():
                 authorized = await self.authorize_integration(request_context.principal, routed.upstream.id)
                 if not authorized:
                     principal = request_context.principal
