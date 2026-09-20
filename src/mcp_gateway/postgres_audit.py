@@ -172,6 +172,7 @@ class PostgresAuditMixin:
         scope_key: str,
         limit: int,
         window_seconds: int = 60,
+        cost: int = 1,
         now: Optional[datetime] = None,
     ) -> dict[str, int | bool]:
         if not self._pool:
@@ -182,14 +183,15 @@ class PostgresAuditMixin:
             microseconds=effective_now.microsecond,
         )
         window_ends_at = window_started_at + timedelta(seconds=window_seconds)
+        cost = max(1, cost)
         async with self._pool.connection() as conn:
             cur = await conn.execute(
                 """
                 INSERT INTO gateway_rate_limits (scope_key, window_started_at, request_count, expires_at)
-                VALUES (%s, %s, 1, %s)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT (scope_key, window_started_at)
                 DO UPDATE SET
-                    request_count = gateway_rate_limits.request_count + 1,
+                    request_count = gateway_rate_limits.request_count + EXCLUDED.request_count,
                     expires_at = EXCLUDED.expires_at,
                     updated_at = now()
                 RETURNING request_count
@@ -197,6 +199,7 @@ class PostgresAuditMixin:
                 (
                     scope_key,
                     window_started_at,
+                    cost,
                     window_ends_at,
                 ),
             )

@@ -44,7 +44,7 @@ psql "$DATABASE_URL" -f schema.sql
 ```bash
 pip install .
 cp config.example.yaml config.yaml
-export MCP_GATEWAY_API_KEY='change-me'
+export MCP_GATEWAY_API_KEY="$(openssl rand -hex 32)"
 export DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway'
 mcp-gateway serve --config ./config.yaml
 ```
@@ -56,7 +56,7 @@ If a `.env` file is present in the working directory, `mcp-gateway` loads it aut
 ```bash
 curl http://localhost:8080/healthz
 curl http://localhost:8080/readyz
-curl -H 'Authorization: Bearer change-me' http://localhost:8080/tools
+curl -H "Authorization: Bearer ${MCP_GATEWAY_API_KEY}" http://localhost:8080/tools
 ```
 
 ## Minimal Config Example

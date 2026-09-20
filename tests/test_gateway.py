@@ -1340,6 +1340,57 @@ def test_mcp_post_handler_returns_invalid_request_for_empty_batch() -> None:
     assert payload["error"]["code"] == -32600
 
 
+def test_mcp_post_handler_rejects_oversized_batch_without_dispatching() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_json():
+        return [{"jsonrpc": "2.0", "method": "ping"}] * 101
+
+    async def fake_handle(payload, request_context):
+        raise AssertionError("oversized batches must not be dispatched")
+
+    gateway.handle = fake_handle  # type: ignore[method-assign]
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer secret"},
+        remote="127.0.0.1",
+        json=fake_json,
+    )
+
+    response = asyncio.run(server.mcp_post_handler(request))
+
+    assert response.status == 400
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["error"]["code"] == -32600
+    assert payload["error"]["message"] == "JSON-RPC batch is too large"
+
+
+def test_mcp_post_handler_charges_rate_limit_for_every_batch_item_before_dispatching() -> None:
+    config = _config_with_upstreams([_upstream()])
+    config.gateway.rate_limit_per_minute = 2
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_json():
+        return [{"jsonrpc": "2.0", "method": "ping"}] * 3
+
+    async def fake_handle(payload, request_context):
+        raise AssertionError("rate-limited batches must not be partially dispatched")
+
+    gateway.handle = fake_handle  # type: ignore[method-assign]
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer secret"},
+        remote="127.0.0.1",
+        json=fake_json,
+    )
+
+    response = asyncio.run(server.mcp_post_handler(request))
+
+    assert response.status == 429
+    assert server._rate_limit_state["subject:shared_bearer:gateway"][1] == 3
+
+
 def test_mcp_post_handler_preserves_batch_order_and_omits_notifications() -> None:
     config = _config_with_upstreams([_upstream()])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
