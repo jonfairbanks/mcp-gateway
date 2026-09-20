@@ -16,6 +16,44 @@ from .__init__ import __version__
 
 _CONFIGURED_TRACER_PROVIDER: Optional[TracerProvider] = None
 
+# Prometheus label values are retained for the lifetime of the process. Keep the
+# method dimension to the finite set of MCP methods understood by the protocol
+# and aggregate extension/invalid methods rather than allowing request data to
+# create an unbounded number of metric children.
+_PROMETHEUS_METHODS = frozenset(
+    {
+        "completion/complete",
+        "elicitation/create",
+        "initialize",
+        "invalid",
+        "logging/setLevel",
+        "notifications/cancelled",
+        "notifications/initialized",
+        "notifications/progress",
+        "notifications/resources/list_changed",
+        "notifications/resources/updated",
+        "notifications/roots/list_changed",
+        "notifications/tools/list_changed",
+        "ping",
+        "prompts/get",
+        "prompts/list",
+        "resources/list",
+        "resources/read",
+        "resources/subscribe",
+        "resources/templates/list",
+        "resources/unsubscribe",
+        "roots/list",
+        "sampling/createMessage",
+        "tools/call",
+        "tools/list",
+    }
+)
+_OTHER_METHOD = "other"
+
+
+def _prometheus_method(method: str) -> str:
+    return method if method in _PROMETHEUS_METHODS else _OTHER_METHOD
+
 
 class GatewayTelemetry:
     def __init__(self, tracer_provider: Optional[TracerProvider] = None, *, enabled: bool = False) -> None:
@@ -218,7 +256,7 @@ class GatewayTelemetry:
             span.set_status(Status(StatusCode.OK))
 
     def record_request(self, method: str) -> None:
-        self._prom_requests_total.labels(method=method).inc()
+        self._prom_requests_total.labels(method=_prometheus_method(method)).inc()
 
     def record_response(
         self,
@@ -230,7 +268,7 @@ class GatewayTelemetry:
         tool_name: Optional[str],
     ) -> None:
         attrs = {
-            "method": method,
+            "method": _prometheus_method(method),
             "success": str(success).lower(),
             "cache_hit": str(cache_hit).lower(),
             "upstream_id": upstream_id or "none",
@@ -250,7 +288,7 @@ class GatewayTelemetry:
     def record_upstream_outcome(self, upstream_id: str, method: str, success: bool) -> None:
         attrs = {
             "upstream_id": upstream_id,
-            "method": method,
+            "method": _prometheus_method(method),
             "success": str(success).lower(),
         }
         self._prom_upstream_calls_total.labels(**attrs).inc()

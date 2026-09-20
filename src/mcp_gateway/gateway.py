@@ -155,11 +155,13 @@ class Gateway:
         scope_key: str,
         limit: int,
         window_seconds: int = 60,
+        cost: int = 1,
     ) -> dict[str, int | bool]:
         return await self._store.consume_rate_limit(
             scope_key=scope_key,
             limit=limit,
             window_seconds=window_seconds,
+            cost=cost,
         )
 
     def auth_required(self) -> bool:
@@ -1453,7 +1455,7 @@ class Gateway:
                     },
                 )
 
-            if method == "tools/call" and (request_context.principal is not None or self.auth_required()):
+            if request_context.principal is not None or self.auth_required():
                 authorized = await self.authorize_integration(request_context.principal, routed.upstream.id)
                 if not authorized:
                     principal = request_context.principal

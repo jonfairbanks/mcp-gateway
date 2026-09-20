@@ -1100,6 +1100,31 @@ def test_preflight_request_rejects_unauthorized_requests() -> None:
     assert response.status == 401
 
 
+def test_preflight_request_rate_limits_client_before_repeated_authentication() -> None:
+    config = _config_with_upstreams([_upstream()])
+    config.gateway.rate_limit_per_minute = 1
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+    authentication_attempts = 0
+
+    async def reject_authentication(request, *, require_principal=False):
+        nonlocal authentication_attempts
+        authentication_attempts += 1
+        return None, web.Response(status=401)
+
+    server._authenticate = reject_authentication  # type: ignore[method-assign]
+    request = SimpleNamespace(headers={"Authorization": "Bearer invalid"}, remote="127.0.0.1")
+
+    _, first_response = asyncio.run(server._preflight_request(request))
+    _, second_response = asyncio.run(server._preflight_request(request))
+
+    assert first_response is not None
+    assert first_response.status == 401
+    assert second_response is not None
+    assert second_response.status == 429
+    assert authentication_attempts == 1
+
+
 def test_build_app_exposes_only_runtime_and_self_service_routes() -> None:
     config = _config_with_upstreams([_upstream()])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
@@ -1252,6 +1277,36 @@ def test_standard_user_cannot_call_tools_without_grants() -> None:
     assert result.payload["error"]["data"]["category"] == "policy_denied"
 
 
+def test_standard_user_cannot_call_non_tool_methods_without_grants() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    request_context = RequestContext(
+        client_id="client-1",
+        principal=AuthenticatedPrincipal(
+            subject="alice",
+            auth_scheme="postgres_api_key",
+            user_id="user-1",
+            api_key_id="key-1",
+        ),
+    )
+
+    for method, params in (
+        ("resources/read", {"uri": "secret://document"}),
+        ("prompts/get", {"name": "private-prompt"}),
+        ("vendor/mutate", {"enabled": True}),
+    ):
+        result = asyncio.run(
+            gateway.handle(
+                {"jsonrpc": "2.0", "id": "1", "method": method, "params": params},
+                request_context,
+            )
+        )
+
+        assert result.success is False
+        assert result.payload["error"]["data"]["category"] == "policy_denied"
+        assert result.payload["error"]["data"]["upstream_id"] == "notion"
+
+
 def test_mcp_post_handler_returns_accepted_for_notification_batches() -> None:
     config = _config_with_upstreams([_upstream()])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
@@ -1308,6 +1363,57 @@ def test_mcp_post_handler_returns_invalid_request_for_empty_batch() -> None:
     assert response.status == 400
     payload = json.loads(response.body.decode("utf-8"))
     assert payload["error"]["code"] == -32600
+
+
+def test_mcp_post_handler_rejects_oversized_batch_without_dispatching() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_json():
+        return [{"jsonrpc": "2.0", "method": "ping"}] * 101
+
+    async def fake_handle(payload, request_context):
+        raise AssertionError("oversized batches must not be dispatched")
+
+    gateway.handle = fake_handle  # type: ignore[method-assign]
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer secret"},
+        remote="127.0.0.1",
+        json=fake_json,
+    )
+
+    response = asyncio.run(server.mcp_post_handler(request))
+
+    assert response.status == 400
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["error"]["code"] == -32600
+    assert payload["error"]["message"] == "JSON-RPC batch is too large"
+
+
+def test_mcp_post_handler_charges_rate_limit_for_every_batch_item_before_dispatching() -> None:
+    config = _config_with_upstreams([_upstream()])
+    config.gateway.rate_limit_per_minute = 2
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
+
+    async def fake_json():
+        return [{"jsonrpc": "2.0", "method": "ping"}] * 3
+
+    async def fake_handle(payload, request_context):
+        raise AssertionError("rate-limited batches must not be partially dispatched")
+
+    gateway.handle = fake_handle  # type: ignore[method-assign]
+    request = SimpleNamespace(
+        headers={"Authorization": "Bearer secret"},
+        remote="127.0.0.1",
+        json=fake_json,
+    )
+
+    response = asyncio.run(server.mcp_post_handler(request))
+
+    assert response.status == 429
+    assert server._rate_limit_state["subject:shared_bearer:gateway"][1] == 3
 
 
 def test_mcp_post_handler_preserves_batch_order_and_omits_notifications() -> None:
