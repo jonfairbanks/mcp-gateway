@@ -1252,6 +1252,36 @@ def test_standard_user_cannot_call_tools_without_grants() -> None:
     assert result.payload["error"]["data"]["category"] == "policy_denied"
 
 
+def test_standard_user_cannot_call_non_tool_methods_without_grants() -> None:
+    config = _config_with_upstreams([_upstream()])
+    gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
+    request_context = RequestContext(
+        client_id="client-1",
+        principal=AuthenticatedPrincipal(
+            subject="alice",
+            auth_scheme="postgres_api_key",
+            user_id="user-1",
+            api_key_id="key-1",
+        ),
+    )
+
+    for method, params in (
+        ("resources/read", {"uri": "secret://document"}),
+        ("prompts/get", {"name": "private-prompt"}),
+        ("vendor/mutate", {"enabled": True}),
+    ):
+        result = asyncio.run(
+            gateway.handle(
+                {"jsonrpc": "2.0", "id": "1", "method": method, "params": params},
+                request_context,
+            )
+        )
+
+        assert result.success is False
+        assert result.payload["error"]["data"]["category"] == "policy_denied"
+        assert result.payload["error"]["data"]["upstream_id"] == "notion"
+
+
 def test_mcp_post_handler_returns_accepted_for_notification_batches() -> None:
     config = _config_with_upstreams([_upstream()])
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
