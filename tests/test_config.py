@@ -25,7 +25,7 @@ upstreams:
     assert len(config.upstreams) == 1
     assert config.gateway.auth_mode == "single_shared"
     assert config.gateway.allow_unauthenticated is False
-    assert config.gateway.bootstrap_admin_api_key == ""
+    assert config.gateway.bootstrap_api_key == ""
     assert config.gateway.public_tools_catalog is False
     assert config.gateway.public_metrics is False
     assert config.gateway.tracing_enabled is False
@@ -138,7 +138,7 @@ upstreams:
     assert config.gateway.public_metrics is True
 
 
-def test_loads_postgres_auth_mode_and_bootstrap_key(tmp_path) -> None:
+def test_loads_postgres_auth_mode_and_legacy_bootstrap_key(tmp_path) -> None:
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
         """
@@ -155,7 +155,38 @@ upstreams:
 
     config = load_config(str(config_file))
     assert config.gateway.auth_mode == "postgres_api_keys"
-    assert config.gateway.bootstrap_admin_api_key == "bootstrap-secret"
+    assert config.gateway.bootstrap_api_key == "bootstrap-secret"
+
+
+def test_loads_canonical_bootstrap_key(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  auth_mode: "postgres_api_keys"
+  bootstrap_api_key: "bootstrap-secret"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(str(config_file))
+
+    assert config.gateway.bootstrap_api_key == "bootstrap-secret"
+
+
+def test_rejects_conflicting_bootstrap_key_aliases(tmp_path) -> None:
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+gateway:
+  bootstrap_api_key: "canonical-secret"
+  bootstrap_admin_api_key: "legacy-secret"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="bootstrap_api_key conflicts"):
+        load_config(str(config_file))
 
 
 @pytest.mark.parametrize("auth_mode", ["dual_migration", "oidc_jwt", "nope"])

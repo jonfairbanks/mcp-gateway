@@ -40,7 +40,7 @@ def _config_with_upstreams(upstreams: list[UpstreamConfig]) -> AppConfig:
             listen_port=8080,
             auth_mode="single_shared",
             api_key="secret",
-            bootstrap_admin_api_key="",
+            bootstrap_api_key="",
             allow_unauthenticated=False,
             public_tools_catalog=False,
             trusted_proxies=["127.0.0.1", "::1"],

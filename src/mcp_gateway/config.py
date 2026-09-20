@@ -31,7 +31,7 @@ class GatewayConfig:
     listen_port: int
     auth_mode: str
     api_key: str
-    bootstrap_admin_api_key: str
+    bootstrap_api_key: str
     allow_unauthenticated: bool
     public_tools_catalog: bool
     trusted_proxies: List[str]
@@ -54,12 +54,13 @@ class GatewayConfig:
         readiness_mode = str(_get(data, "readiness_mode", READINESS_MODE_ANY))
         if readiness_mode not in VALID_READINESS_MODES:
             raise ValueError("gateway.readiness_mode must be one of: any, required, threshold")
+        bootstrap_api_key = _bootstrap_api_key(data)
         return cls(
             listen_host=_get(data, "listen_host", "0.0.0.0"),
             listen_port=int(_get(data, "listen_port", 8080)),
             auth_mode=auth_mode,
             api_key=_get(data, "api_key", ""),
-            bootstrap_admin_api_key=_get(data, "bootstrap_admin_api_key", ""),
+            bootstrap_api_key=bootstrap_api_key,
             allow_unauthenticated=bool(_get(data, "allow_unauthenticated", False)),
             public_tools_catalog=bool(_get(data, "public_tools_catalog", False)),
             trusted_proxies=[str(proxy) for proxy in list(_get(data, "trusted_proxies", ["127.0.0.1", "::1"]))],
@@ -197,6 +198,14 @@ def _get(data: Dict[str, Any], key: str, default: Any) -> Any:
     if value is None:
         return default
     return value
+
+
+def _bootstrap_api_key(data: Dict[str, Any]) -> str:
+    canonical = _get(data, "bootstrap_api_key", "")
+    legacy = _get(data, "bootstrap_admin_api_key", "")
+    if canonical and legacy and canonical != legacy:
+        raise ValueError("gateway.bootstrap_api_key conflicts with gateway.bootstrap_admin_api_key")
+    return canonical or legacy
 
 
 def _optional_int(value: Any) -> Optional[int]:

@@ -9,6 +9,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from mcp_gateway.auth import AuthService
 from mcp_gateway.config import AppConfig, CacheConfig, GatewayConfig, LoggingConfig, UpstreamConfig
 from mcp_gateway.gateway import Gateway
 from mcp_gateway.logging import Logger
@@ -36,7 +37,7 @@ def _gateway_config(http_endpoint: str) -> AppConfig:
             listen_port=0,
             auth_mode="single_shared",
             api_key="phase-one-secret",
-            bootstrap_admin_api_key="",
+            bootstrap_api_key="",
             allow_unauthenticated=False,
             public_tools_catalog=False,
             trusted_proxies=["127.0.0.1", "::1"],
@@ -104,20 +105,8 @@ async def _prepare_database(store: PostgresStore) -> None:
                 mcp_requests,
                 mcp_cache,
                 gateway_rate_limits,
-                gateway_api_keys,
-                gateway_group_memberships,
-                gateway_group_integration_grants,
-                gateway_group_platform_grants,
-                gateway_groups,
-                gateway_users,
-                gateway_policy_state
+                gateway_access_keys
             CASCADE
-            """
-        )
-        await conn.execute(
-            """
-            INSERT INTO gateway_policy_state (singleton_key, policy_revision)
-            VALUES ('default', 0)
             """
         )
 
@@ -485,9 +474,8 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> N
             server_b = HttpServer(config, gateway_b, logger, telemetry_b)
 
             try:
-                user = await gateway_a.create_user(subject="alice", display_name="Alice", role="admin")
-                assert user is not None
-                issued = await gateway_a.issue_api_key_for_user(user_id=user["id"], key_name="laptop")
+                auth = AuthService(config, store_a, logger)
+                issued = await auth.issue_api_key(key_name="laptop")
                 headers = {"Authorization": f"Bearer {issued['api_key']}"}
 
                 await gateway_a.warmup()
@@ -501,8 +489,8 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> N
                                 me_b = await client_b.get("/v1/me", headers=headers)
                                 assert me_a.status == 200
                                 assert me_b.status == 200
-                                assert (await me_a.json())["subject"] == "alice"
-                                assert (await me_b.json())["subject"] == "alice"
+                                assert (await me_a.json())["subject"] == f"api_key:{issued['api_key_id']}"
+                                assert (await me_b.json())["subject"] == f"api_key:{issued['api_key_id']}"
 
                                 payload = {
                                     "jsonrpc": "2.0",
@@ -518,6 +506,19 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> N
                                 assert (await first.json())["result"]["content"][0]["text"] == "http.echo:shared-cache"
                                 assert (await second.json())["result"]["content"][0]["text"] == "http.echo:shared-cache"
                                 assert tool_call_count == 1
+
+                                second_key = await auth.issue_api_key(key_name="desktop")
+                                other_headers = {"Authorization": f"Bearer {second_key['api_key']}"}
+                                isolated = await client_b.post("/mcp", headers=other_headers, json=payload)
+                                assert isolated.status == 200
+                                assert "result" in await isolated.json()
+                                assert tool_call_count == 2
+
+                                await auth.revoke_api_key(issued["api_key_id"])
+                                for client in (client_a, client_b):
+                                    denied = await client.post("/mcp", headers=headers, json=payload)
+                                    assert denied.status == 401
+                                assert tool_call_count == 2
             finally:
                 await gateway_a.close()
                 await gateway_b.close()

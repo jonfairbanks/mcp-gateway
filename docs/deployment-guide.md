@@ -17,7 +17,7 @@ Postgres is the shared state backend for:
 - request and response audit rows
 - denials
 - shared cache entries
-- Postgres-backed API keys and RBAC state
+- Postgres-backed API keys
 - shared rate limiting
 
 ## Prerequisites
@@ -92,7 +92,7 @@ upstreams:
 - `${NAME}` requires the environment variable to be set
 - `${NAME:-default}` uses `default` when the variable is unset or empty
 
-This example only shows the smallest useful setup. The checked-in example config enables `context7` by default and keeps broad admin HTTP off by default. See [`docs/configuration.md`](./configuration.md) for the full configuration surface and defaults.
+This example only shows the smallest useful setup. The checked-in example config enables `context7` by default. See [`docs/configuration.md`](./configuration.md) for the full configuration surface and defaults.
 
 ## Authentication Modes
 
@@ -103,33 +103,32 @@ Use this when one bearer token is enough for the deployment.
 Characteristics:
 
 - easiest mode to deploy
-- all authenticated callers are effectively full-access gateway users
+- all authenticated callers have full gateway access
 - good for a single operator or a trusted internal client
 
 ### `postgres_api_keys`
 
-Use this when multiple users need separate API keys and access control.
+Use this when callers need separate, independently revocable API keys.
 
 Characteristics:
 
-- users authenticate with Postgres-backed API keys
-- `admin` retains full platform access
-- standard users authenticate successfully but require RBAC grants for tool execution and delegated operator workflows
-- supports break-glass access through `gateway.bootstrap_admin_api_key`
+- callers authenticate with Postgres-backed API keys from `gateway_access_keys`
+- every authenticated key has the same gateway access
+- per-upstream `deny_tools` remains the only configured tool restriction
+- supports break-glass access through `gateway.bootstrap_api_key`
+- `gateway.bootstrap_admin_api_key` remains accepted for existing configuration
 
-To seed the first admin key:
+Create an owner key through the operator CLI:
 
 ```bash
 DATABASE_URL='postgresql://postgres:postgres@localhost:5432/mcp_gateway' \
   mcp-gateway create-api-key \
   --config /path/to/config.yaml \
-  --subject alice \
-  --display-name "Alice" \
-  --role admin \
-  --key-name default
+  --key-name primary \
+  --expires-days 90
 ```
 
-For standard users, omit `--role` and grant access through groups and integration or platform grants.
+Store the displayed secret once. The gateway only stores its hash.
 
 ## Endpoints
 
@@ -141,25 +140,33 @@ For standard users, omit `--role` and grant access through groups and integratio
 - `GET /healthz` liveness endpoint
 - `GET /readyz` readiness endpoint
 
-### Management endpoints
+### Authentication Endpoint
 
-Always available self-service endpoints:
+Authenticated identity endpoint:
 
 - `GET /v1/me`
-- `GET /v1/me/api-keys`
-- `POST /v1/me/api-keys`
-- `DELETE /v1/me/api-keys/{key_id}`
 
-Operator workflows use the CLI rather than an HTTP admin control plane:
+API key lifecycle uses the CLI rather than HTTP endpoints:
 
 - `mcp-gateway validate-config --config ./config.yaml`
 - `mcp-gateway warmup-check --config ./config.yaml`
 - `mcp-gateway list-integrations --config ./config.yaml`
-- `mcp-gateway create-user --config ./config.yaml --subject alice --display-name Alice --issue-api-key`
-- `mcp-gateway create-group --config ./config.yaml --name sales --description "Sales team"`
-- `mcp-gateway add-group-member --config ./config.yaml --group-id <group-id> --subject alice`
-- `mcp-gateway grant-integration --config ./config.yaml --group-id <group-id> --upstream-id jira`
-- `mcp-gateway grant-platform --config ./config.yaml --group-id <group-id> --permission admin.usage.read`
+- `mcp-gateway create-api-key --config ./config.yaml --key-name NAME --expires-days N`
+- `mcp-gateway list-api-keys --config ./config.yaml`
+- `mcp-gateway revoke-api-key --config ./config.yaml --key-id UUID`
+
+## Auth Migration Rollout
+
+Use the deployment pipeline to roll out the owner-key migration. Do not run the migration as an automatic local startup step.
+
+1. Take a restorable Postgres backup before the pipeline runs the migration.
+2. Have the CI deployment stage apply `schema.sql`, then `migrations/001_owner_api_keys.sql`, with `ON_ERROR_STOP` enabled.
+3. Deploy the release with `auth_mode: postgres_api_keys` and issue any required owner keys through the CLI.
+4. Verify `GET /v1/me` and a normal MCP tool call with an issued key before retiring legacy access.
+
+The migration creates and uses `gateway_access_keys`. It imports only legacy keys that are active, unexpired, unrevoked, and attached to active `admin` users. It preserves those keys' IDs and hashes. Restricted non-admin keys are skipped so the migration cannot expand their tool access. Issue replacement owner keys explicitly for callers that used restricted keys.
+
+Legacy user, group, grant, and identity tables remain untouched for rollback. Revocation state is independent on each side: revoking a `gateway_access_keys` key does not revoke its legacy `gateway_api_keys` row, and revoking a legacy row does not revoke its owner-key row. If a rollback must disable a credential, revoke it in both stores before returning traffic to the previous release.
 
 ## Upstream Configuration Guidance
 

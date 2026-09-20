@@ -46,7 +46,7 @@
 
   <rect class="store" x="760" y="610" width="270" height="104"/>
   <text class="label" x="895" y="642" text-anchor="middle">Shared Postgres</text>
-  <text class="text" x="895" y="668" text-anchor="middle">audit + cache + auth/RBAC</text>
+  <text class="text" x="895" y="668" text-anchor="middle">audit + cache + API keys</text>
   <text class="text" x="895" y="690" text-anchor="middle">+ shared rate limits</text>
 
   <rect class="store" x="1080" y="610" width="210" height="104"/>

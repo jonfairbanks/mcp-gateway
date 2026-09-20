@@ -17,14 +17,10 @@ class PostgresAuditMixin:
         upstream_id: Optional[str],
         tool_name: Optional[str],
         client_id: Optional[str],
-        auth_user_id: Optional[str],
         auth_api_key_id: Optional[str],
-        auth_role: Optional[str],
         cache_key: Optional[str],
         auth_subject: Optional[str] = None,
         auth_scheme: Optional[str] = None,
-        auth_group_names: Optional[list[str]] = None,
-        authorized_upstream_id: Optional[str] = None,
     ) -> None:
         if not self._pool:
             return
@@ -39,16 +35,12 @@ class PostgresAuditMixin:
                     upstream_id,
                     tool_name,
                     client_id,
-                    auth_user_id,
                     auth_api_key_id,
-                    auth_role,
                     auth_subject,
                     auth_scheme,
-                    auth_group_names,
-                    authorized_upstream_id,
                     cache_key
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     request_id,
@@ -58,13 +50,9 @@ class PostgresAuditMixin:
                     upstream_id,
                     tool_name,
                     client_id,
-                    auth_user_id,
                     auth_api_key_id,
-                    auth_role,
                     auth_subject,
                     auth_scheme,
-                    Jsonb(auth_group_names or []),
-                    authorized_upstream_id,
                     cache_key,
                 ),
             )

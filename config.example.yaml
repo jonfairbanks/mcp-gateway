@@ -9,6 +9,8 @@ gateway:
   listen_port: 8080
   auth_mode: "single_shared"
   api_key: "${MCP_GATEWAY_API_KEY}"
+  # For postgres_api_keys mode, set a break-glass shared key with:
+  # bootstrap_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY}"
   allow_unauthenticated: false
   public_tools_catalog: true
   public_metrics: true

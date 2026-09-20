@@ -1,6 +1,6 @@
 # MCP Gateway
 
-`mcp-gateway` is an MCP aggregation proxy for teams that want one MCP endpoint in front of many upstream MCP servers.
+`mcp-gateway` is an MCP aggregation proxy for operators who want one MCP endpoint in front of many upstream MCP servers.
 
 It is intended for operators and platform engineers who need to:
 
@@ -29,8 +29,8 @@ For operators:
 - supports `stdio` and remote `streamable_http` upstreams
 - stores audit logs, shared cache entries, and shared rate-limit state in Postgres
 - exposes Prometheus metrics at `GET /metrics`
-- supports single shared bearer auth or Postgres-backed API keys with RBAC
-- keeps the HTTP surface focused on MCP traffic, runtime visibility, and self-service; use CLI commands for operator workflows
+- supports single shared bearer auth or operator-managed Postgres API keys
+- keeps the HTTP surface focused on MCP traffic and runtime visibility; use CLI commands for API key lifecycle
 
 ## Prerequisites
 
@@ -115,7 +115,7 @@ The checked-in example config is intentionally runnable and enables `context7` b
 - Client configuration: [docs/client-configuration.md](docs/client-configuration.md)
 - Operations guide: [docs/operations.md](docs/operations.md)
 - Configuration reference: [docs/configuration.md](docs/configuration.md)
-- RBAC onboarding: [docs/rbac-onboarding.md](docs/rbac-onboarding.md)
+- Authentication: [docs/authentication.md](docs/authentication.md)
 - Development and testing: [docs/development.md](docs/development.md)
 - Database schema: [schema.sql](schema.sql)
 
