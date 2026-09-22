@@ -393,7 +393,10 @@ class StdioUpstream:
     async def _notify_locked(self, payload: Dict[str, Any]) -> None:
         assert self._process and self._process.stdin
         self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
-        await asyncio.wait_for(self._process.stdin.drain(), timeout=self._timeout)
+        # timeout() preserves caller cancellation even when drain completes in the
+        # same event-loop turn (wait_for can swallow that race on Python 3.11).
+        async with asyncio.timeout(self._timeout):
+            await self._process.stdin.drain()
 
     async def _call_locked(self, payload: Dict[str, Any]) -> UpstreamResponse:
         assert self._process and self._process.stdout
@@ -404,7 +407,8 @@ class StdioUpstream:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise asyncio.TimeoutError()
-            line = await asyncio.wait_for(self._process.stdout.readline(), timeout=remaining)
+            async with asyncio.timeout(remaining):
+                line = await self._process.stdout.readline()
             if not line:
                 raise RuntimeError("Upstream stdio closed; request outcome unknown")
             data = json.loads(line.decode("utf-8"))
