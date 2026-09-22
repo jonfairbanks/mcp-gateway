@@ -1098,11 +1098,12 @@ def test_mcp_get_handler_returns_method_not_allowed() -> None:
     assert response.status == 405
     assert response.headers["Allow"] == "POST, OPTIONS"
     assert response.text == "This endpoint does not support GET SSE streams."
-    assert response.headers["Access-Control-Allow-Origin"] == "*"
+    assert "Access-Control-Allow-Origin" not in response.headers
 
 
 def test_mcp_options_handler_returns_cors_preflight_headers() -> None:
     config = _config_with_upstreams([_upstream()])
+    config.gateway.allowed_origins = ["http://localhost:3000"]
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
     server = HttpServer(config, gateway, Logger(stdout_json=False), GatewayTelemetry())
 
@@ -1120,7 +1121,7 @@ def test_mcp_options_handler_returns_cors_preflight_headers() -> None:
     assert response.headers["Allow"] == "POST, OPTIONS"
     assert response.headers["Access-Control-Allow-Origin"] == "http://localhost:3000"
     assert response.headers["Access-Control-Allow-Methods"] == "POST, OPTIONS"
-    assert response.headers["Access-Control-Allow-Headers"] == "authorization,content-type,mcp-protocol-version"
+    assert response.headers["Access-Control-Allow-Headers"] == "Authorization, Content-Type, MCP-Protocol-Version, MCP-Session-ID, X-Client-Id"
     assert response.headers["Access-Control-Max-Age"] == "600"
     assert "Origin" in response.headers["Vary"]
 
@@ -1422,6 +1423,7 @@ def test_mcp_post_handler_accepts_supported_legacy_protocol_header() -> None:
 
 def test_error_middleware_maps_http_method_not_allowed_for_mcp_and_logs_request_shape() -> None:
     config = _config_with_upstreams([_upstream()])
+    config.gateway.allowed_origins = ["http://localhost:3000"]
     gateway = Gateway(config, PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
     logger = RecordingLogger()
     server = HttpServer(config, gateway, logger, GatewayTelemetry())

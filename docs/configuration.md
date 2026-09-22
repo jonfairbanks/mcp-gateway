@@ -32,6 +32,7 @@ Operational guidance:
 - `api_key` bearer token used in `single_shared` mode
 - `bootstrap_api_key` optional break-glass shared token for `postgres_api_keys` mode. `bootstrap_admin_api_key` remains an accepted alias for existing configuration.
 - `allow_unauthenticated` default `false`; when `true`, MCP execution routes may be open, but `GET /v1/me` still requires a valid bearer token
+- `allowed_origins` defaults to `[]`. MCP requests with an `Origin` header must match an exact HTTP(S) origin in this list, such as `https://client.example.com`. Native clients without `Origin` remain supported. Wildcards and `null` are rejected.
 - `public_tools_catalog` default `false`; when `true`, `GET /tools` skips auth but still uses rate limiting
 - `public_metrics` default `false`; when `true`, `GET /metrics` skips auth
 - `tracing_enabled` default `false`; when `true`, OTEL exporter environment variables may activate tracing/export
@@ -122,7 +123,7 @@ Operator guidance:
 
 - `command` string or string list
 - `args` optional list, appended to `command`
-- `env` optional map of environment variables
+- `env` optional map of environment variables. Stdio processes inherit only `PATH`, `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, `TMPDIR`, `TMP`, `TEMP`, `SYSTEMROOT`, and `WINDIR`. Pass each upstream credential explicitly, for example `SERVICE_TOKEN: "${SERVICE_TOKEN}"`. Other parent variables, including proxy and runtime-loader settings, are not inherited. This is environment filtering, not an OS sandbox; child processes still share the gateway user and filesystem.
 - `cwd` optional working directory
 - `stdio_read_limit_bytes` default `104857600` (100 MB)
 
@@ -133,6 +134,7 @@ Use `stdio` when the upstream MCP is installed locally on each gateway replica.
 - `endpoint` JSON-RPC HTTP endpoint
 - `http_headers` optional static headers
 - `bearer_token_env_var` optional env var name used if `Authorization` is not provided in `http_headers`
+- `http_response_max_bytes` defaults to 8388608 (8 MiB), measured after HTTP decompression. Applies to JSON, SSE, error, and notification responses, including SSE framing. SSE lines and events share this byte limit; there are no smaller per-line or per-event byte limits. SSE additionally permits at most 16384 lines and 1024 parsed data events. Exceeding a limit fails the upstream request.
 - `http_serialize_requests` default `false` (concurrent HTTP calls enabled). Set `true` to force one-at-a-time requests for that upstream.
 - The gateway currently supports MCP protocol versions `2025-03-26` and `2025-11-25`. Unsupported versions are rejected.
 
@@ -168,10 +170,7 @@ cache:
 upstreams:
   - id: "context7"
     transport: "stdio"
-    command: "npx"
-    args:
-      - "-y"
-      - "@upstash/context7-mcp"
+    command: "context7-mcp"
     deny_tools: []
 
   - id: "chrome-devtools"
@@ -209,3 +208,13 @@ Common validation failures:
 - `bearer_token_env_var` must be a valid environment variable name
 - `command` must be a string or list of strings
 - `args` must be a list
+
+## Security Behavior
+
+Boolean settings accept YAML booleans or the strings `true` and `false` (case insensitive), including values from environment interpolation. Other values are rejected.
+
+Denied tools remain in the internal routing registry so calls return a policy denial, but their schemas are omitted from fresh and cached `tools/list` responses. The optional `/tools` operator catalog still reports configured tool names and deny rules; leave `public_tools_catalog` disabled to keep that metadata private.
+
+Stdio requests are never replayed after a write or response failure because their outcome may be unknown. After losing an initialized session, a later independent request restarts the child and completes the MCP initialization handshake before sending the new request. If initialization fails, the new request is not sent. Gateway readiness retains its startup-policy behavior so a recoverable timeout does not prevent traffic from triggering recovery. Check the upstream's state before manually retrying a mutation.
+
+Cache normalization ignores only the protocol-level `params._meta.progressToken`. Nested tool arguments are preserved. The `v2` cache namespace prevents reuse of older entries; existing entries expire normally.

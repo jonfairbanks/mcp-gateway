@@ -11,19 +11,17 @@ def json_dumps(value: Any) -> str:
 
 
 def _normalize_cache_params(value: Any) -> Any:
-    if isinstance(value, dict):
-        normalized: Dict[str, Any] = {}
-        for key, item in value.items():
-            if key == "_meta" and isinstance(item, dict):
-                meta = {meta_key: _normalize_cache_params(meta_value) for meta_key, meta_value in item.items() if meta_key != "progressToken"}
-                if meta:
-                    normalized[key] = meta
-                continue
-            normalized[key] = _normalize_cache_params(item)
-        return normalized
-    if isinstance(value, list):
-        return [_normalize_cache_params(item) for item in value]
-    return value
+    if not isinstance(value, dict):
+        return value
+    normalized = dict(value)
+    meta = normalized.get("_meta")
+    if isinstance(meta, dict):
+        meta = {key: item for key, item in meta.items() if key != "progressToken"}
+        if meta:
+            normalized["_meta"] = meta
+        else:
+            normalized.pop("_meta", None)
+    return normalized
 
 
 def normalize_params(params: Any) -> str:

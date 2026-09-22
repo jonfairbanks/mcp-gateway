@@ -12,6 +12,8 @@ gateway:
   # For postgres_api_keys mode, set a break-glass shared key with:
   # bootstrap_api_key: "${MCP_GATEWAY_BOOTSTRAP_ADMIN_API_KEY}"
   allow_unauthenticated: false
+  # Browser clients must be listed explicitly; native clients need no entry.
+  allowed_origins: []
   public_tools_catalog: true
   public_metrics: true
 
@@ -27,10 +29,7 @@ upstreams:
   - id: "context7"
     name: "Context7 MCP"
     transport: "stdio"
-    command: "npx"
-    args:
-      - "-y"
-      - "@upstash/context7-mcp"
+    command: "context7-mcp"
     env: {}
     deny_tools: []
     tool_routes:

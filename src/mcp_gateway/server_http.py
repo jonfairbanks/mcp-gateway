@@ -72,6 +72,14 @@ class HttpServer:
             return self._rest_error(500, "InternalError", "Unexpected server error.")
 
     @web.middleware
+    async def _origin_middleware(self, request: web.Request, handler):
+        origins = request.headers.getall("Origin", [])
+        if request.path == "/mcp" and origins:
+            if len(origins) != 1 or origins[0] not in self._config.gateway.allowed_origins:
+                return web.Response(status=403, text="Origin not allowed", headers={"Vary": "Origin"})
+        return await handler(request)
+
+    @web.middleware
     async def _tracing_middleware(self, request: web.Request, handler):
         context = self._telemetry.extract_context(request.headers)
         with self._telemetry.start_http_server_span(request.method, request.path, context=context):
@@ -313,13 +321,12 @@ class HttpServer:
 
     def _mcp_cors_headers(self, request: web.Request) -> Dict[str, str]:
         origin = request.headers.get("Origin")
-        allow_origin = origin if origin else "*"
-        requested_headers = request.headers.get("Access-Control-Request-Headers")
-        allow_headers = requested_headers or "Authorization, Content-Type, MCP-Protocol-Version"
+        if origin not in self._config.gateway.allowed_origins:
+            return {"Vary": "Origin"}
         return {
-            "Access-Control-Allow-Origin": allow_origin,
+            "Access-Control-Allow-Origin": origin,
             "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": allow_headers,
+            "Access-Control-Allow-Headers": "Authorization, Content-Type, MCP-Protocol-Version, MCP-Session-ID, X-Client-Id",
             "Access-Control-Max-Age": "600",
             "Vary": "Origin, Access-Control-Request-Method, Access-Control-Request-Headers",
         }
@@ -494,7 +501,7 @@ class HttpServer:
     def build_app(self) -> web.Application:
         app = web.Application(
             client_max_size=self._config.gateway.request_max_bytes,
-            middlewares=[self._tracing_middleware, self._error_middleware],
+            middlewares=[self._tracing_middleware, self._error_middleware, self._origin_middleware],
         )
         routes = [
             web.get("/", self.root_handler),

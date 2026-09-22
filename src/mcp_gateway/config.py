@@ -4,6 +4,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -39,6 +40,7 @@ class GatewayConfig:
     rate_limit_per_minute: int
     circuit_breaker_fail_threshold: int
     circuit_breaker_open_seconds: int
+    allowed_origins: List[str] = field(default_factory=list)
     public_metrics: bool = False
     tracing_enabled: bool = False
     readiness_mode: str = READINESS_MODE_ANY
@@ -61,15 +63,16 @@ class GatewayConfig:
             auth_mode=auth_mode,
             api_key=_get(data, "api_key", ""),
             bootstrap_api_key=bootstrap_api_key,
-            allow_unauthenticated=bool(_get(data, "allow_unauthenticated", False)),
-            public_tools_catalog=bool(_get(data, "public_tools_catalog", False)),
+            allow_unauthenticated=_boolean(_get(data, "allow_unauthenticated", False), "allow_unauthenticated"),
+            public_tools_catalog=_boolean(_get(data, "public_tools_catalog", False), "public_tools_catalog"),
             trusted_proxies=[str(proxy) for proxy in list(_get(data, "trusted_proxies", ["127.0.0.1", "::1"]))],
             request_max_bytes=int(_get(data, "request_max_bytes", 2 * 1024 * 1024)),
             rate_limit_per_minute=int(_get(data, "rate_limit_per_minute", 120)),
             circuit_breaker_fail_threshold=int(_get(data, "circuit_breaker_fail_threshold", 20)),
             circuit_breaker_open_seconds=int(_get(data, "circuit_breaker_open_seconds", 30)),
-            public_metrics=bool(_get(data, "public_metrics", False)),
-            tracing_enabled=bool(_get(data, "tracing_enabled", False)),
+            allowed_origins=_allowed_origins(_get(data, "allowed_origins", [])),
+            public_metrics=_boolean(_get(data, "public_metrics", False), "public_metrics"),
+            tracing_enabled=_boolean(_get(data, "tracing_enabled", False), "tracing_enabled"),
             readiness_mode=readiness_mode,
             required_ready_upstreams=[
                 str(item) for item in _string_list(_get(data, "required_ready_upstreams", []), "gateway.required_ready_upstreams")
@@ -91,10 +94,10 @@ class LoggingConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "LoggingConfig":
         return cls(
-            stdout_json=bool(_get(data, "stdout_json", True)),
+            stdout_json=_boolean(_get(data, "stdout_json", True), "stdout_json"),
             extra_redact_fields=[str(field) for field in _string_list(_get(data, "extra_redact_fields", []), "logging.extra_redact_fields")],
-            store_request_bodies=bool(_get(data, "store_request_bodies", False)),
-            store_response_bodies=bool(_get(data, "store_response_bodies", False)),
+            store_request_bodies=_boolean(_get(data, "store_request_bodies", False), "store_request_bodies"),
+            store_response_bodies=_boolean(_get(data, "store_response_bodies", False), "store_response_bodies"),
             body_capture_upstreams=[str(item) for item in _string_list(_get(data, "body_capture_upstreams", []), "logging.body_capture_upstreams")],
             body_capture_tools=[str(item) for item in _string_list(_get(data, "body_capture_tools", []), "logging.body_capture_tools")],
         )
@@ -111,7 +114,7 @@ class CacheConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "CacheConfig":
         return cls(
-            enabled=bool(_get(data, "enabled", True)),
+            enabled=_boolean(_get(data, "enabled", True), "enabled"),
             max_entries=int(_get(data, "max_entries", 1000)),
             default_ttl_minutes=int(_get(data, "default_ttl_minutes", 60)),
             allowed_tools=[str(tool) for tool in _string_list(_get(data, "allowed_tools", []), "cache.allowed_tools")],
@@ -141,6 +144,7 @@ class UpstreamConfig:
     circuit_breaker_fail_threshold: Optional[int]
     circuit_breaker_open_seconds: Optional[int]
     tool_routes: List[str]
+    http_response_max_bytes: int = 8 * 1024 * 1024
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "UpstreamConfig":
@@ -159,11 +163,12 @@ class UpstreamConfig:
             endpoint=data.get("endpoint"),
             http_headers=_string_map(data.get("http_headers", {}), f"upstreams[{upstream_id}].http_headers"),
             bearer_token_env_var=bearer_token_env_var,
-            http_serialize_requests=bool(data.get("http_serialize_requests", False)),
+            http_serialize_requests=_boolean(data.get("http_serialize_requests", False), "http_serialize_requests"),
             command=_normalize_stdio_command(data),
             env=_string_map(data.get("env", {}), f"upstreams[{upstream_id}].env"),
             cwd=data.get("cwd"),
             timeout_ms=int(data.get("timeout_ms", 10000)),
+            http_response_max_bytes=int(data.get("http_response_max_bytes", 8 * 1024 * 1024)),
             stdio_read_limit_bytes=int(data.get("stdio_read_limit_bytes", 100 * 1024 * 1024)),
             max_in_flight=int(data.get("max_in_flight", 20)),
             deny_tools=[str(tool) for tool in _string_list(data.get("deny_tools", []), f"upstreams[{upstream_id}].deny_tools")],
@@ -198,6 +203,36 @@ def _get(data: Dict[str, Any], key: str, default: Any) -> Any:
     if value is None:
         return default
     return value
+
+
+def _boolean(value: Any, path: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in {"true", "false"}:
+        return value.lower() == "true"
+    raise ValueError(f"{path} must be true or false")
+
+
+def _allowed_origins(value: Any) -> List[str]:
+    origins = _string_list(value, "gateway.allowed_origins")
+    for origin in origins:
+        if not isinstance(origin, str):
+            raise ValueError("gateway.allowed_origins must contain HTTP(S) origins")
+        parsed = urlsplit(origin)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path or parsed.query or parsed.fragment
+            or "*" in origin or any(char.isspace() for char in origin)
+        ):
+            raise ValueError("gateway.allowed_origins must contain exact HTTP(S) origins without paths")
+        try:
+            _ = parsed.port
+        except ValueError as exc:
+            raise ValueError("gateway.allowed_origins contains an invalid port") from exc
+    return origins
 
 
 def _bootstrap_api_key(data: Dict[str, Any]) -> str:
@@ -333,6 +368,8 @@ def _validate_app_config(config: AppConfig) -> None:
             if not upstream.command:
                 errors.append(f"{path}.command is required when transport is 'stdio'")
 
+        if upstream.http_response_max_bytes <= 0:
+            errors.append(f"{path}.http_response_max_bytes must be greater than 0")
         if upstream.timeout_ms <= 0:
             errors.append(f"{path}.timeout_ms must be greater than 0")
         if upstream.stdio_read_limit_bytes <= 0:
