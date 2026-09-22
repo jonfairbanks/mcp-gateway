@@ -85,8 +85,6 @@ def test_http_body_limit_accepts_exact_boundary():
 @pytest.mark.parametrize("limit,body", [
     ("MAX_SSE_LINES", ": comment\n: comment\n: comment\n"),
     ("MAX_SSE_EVENTS", "data: {}\n\ndata: {}\n\ndata: {}\n\n"),
-    ("MAX_SSE_LINE_BYTES", "data: {}\n"),
-    ("MAX_SSE_EVENT_BYTES", "data: a\ndata: b\n\n"),
 ])
 def test_sse_parser_enforces_independent_budgets(monkeypatch, limit, body):
     monkeypatch.setattr(StreamableHTTPUpstream, limit, 2)

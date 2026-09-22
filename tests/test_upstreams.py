@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from mcp_gateway import upstreams
 from mcp_gateway.protocol import CURRENT_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION
 
@@ -232,3 +234,41 @@ def test_stdio_upstream_restarts_after_child_exit() -> None:
     assert second.success is True
     assert second.payload["result"]["content"][0]["text"] == "stdio.echo:second"
     assert second_pid != first_pid
+
+
+@pytest.mark.parametrize("encoding", ["json", "sse", "sse_multiline"])
+@pytest.mark.parametrize("content_mib,limit_mib", [(3, 8), (9, 16)])
+def test_http_large_tool_results_share_configured_byte_limit(encoding, content_mib, limit_mib):
+    payload = {"jsonrpc": "2.0", "id": "large", "result": {
+        "content": [{"type": "text", "text": "x" * (content_mib * 1024 * 1024)}]}}
+    if encoding == "sse_multiline":
+        body = "\n".join("data: " + line for line in json.dumps(payload, indent=2).splitlines()) + "\n\n"
+    else:
+        body = json.dumps(payload)
+        if encoding == "sse":
+            body = "data: " + body + "\n\n"
+    client = upstreams.StreamableHTTPUpstream("https://example.test/mcp", 1000,
+                                             response_max_bytes=limit_mib * 1024 * 1024)
+    client._session = FakeClientSession([FakeResponse(200, body)])
+    response = asyncio.run(client.call({"jsonrpc": "2.0", "id": "large", "method": "tools/call"}))
+    assert response.success
+    assert response.payload == payload
+
+
+@pytest.mark.parametrize("encoding", ["json", "sse", "sse_multiline"])
+@pytest.mark.parametrize("over_limit", [False, True])
+def test_http_json_and_sse_byte_boundary_includes_framing(encoding, over_limit):
+    payload = {"jsonrpc": "2.0", "id": 7, "result": {"text": "caf\u00e9"}}
+    body = json.dumps(payload, ensure_ascii=False, indent=2)
+    if encoding == "sse":
+        body = "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+    elif encoding == "sse_multiline":
+        body = "\n".join("data: " + line for line in body.splitlines()) + "\n\n"
+    client = upstreams.StreamableHTTPUpstream("https://example.test/mcp", 1000,
+                                             response_max_bytes=len(body.encode("utf-8")) - int(over_limit))
+    client._session = FakeClientSession([FakeResponse(200, body)])
+    if over_limit:
+        with pytest.raises(RuntimeError, match="http_response_max_bytes"):
+            asyncio.run(client.call({"id": 7, "method": "tools/list"}))
+    else:
+        assert asyncio.run(client.call({"id": 7, "method": "tools/list"})).payload == payload

@@ -134,7 +134,7 @@ Use `stdio` when the upstream MCP is installed locally on each gateway replica.
 - `endpoint` JSON-RPC HTTP endpoint
 - `http_headers` optional static headers
 - `bearer_token_env_var` optional env var name used if `Authorization` is not provided in `http_headers`
-- `http_response_max_bytes` defaults to 8388608 (8 MiB), measured after HTTP decompression. Applies to JSON, SSE, error, and notification responses. SSE additionally permits at most 16384 lines, 1024 parsed data events, 1 MiB per line, and 2 MiB of data per event. Exceeding a limit fails the upstream request.
+- `http_response_max_bytes` defaults to 8388608 (8 MiB), measured after HTTP decompression. Applies to JSON, SSE, error, and notification responses, including SSE framing. SSE lines and events share this byte limit; there are no smaller per-line or per-event byte limits. SSE additionally permits at most 16384 lines and 1024 parsed data events. Exceeding a limit fails the upstream request.
 - `http_serialize_requests` default `false` (concurrent HTTP calls enabled). Set `true` to force one-at-a-time requests for that upstream.
 - The gateway currently supports MCP protocol versions `2025-03-26` and `2025-11-25`. Unsupported versions are rejected.
 
@@ -215,6 +215,6 @@ Boolean settings accept YAML booleans or the strings `true` and `false` (case in
 
 Denied tools remain in the internal routing registry so calls return a policy denial, but their schemas are omitted from fresh and cached `tools/list` responses. The optional `/tools` operator catalog still reports configured tool names and deny rules; leave `public_tools_catalog` disabled to keep that metadata private.
 
-Stdio requests are never replayed after a write or response failure because their outcome may be unknown. A later independent request can restart the child. Check the upstream's state before manually retrying a mutation.
+Stdio requests are never replayed after a write or response failure because their outcome may be unknown. After losing an initialized session, a later independent request restarts the child and completes the MCP initialization handshake before sending the new request. If initialization fails, the new request is not sent. Gateway readiness retains its startup-policy behavior so a recoverable timeout does not prevent traffic from triggering recovery. Check the upstream's state before manually retrying a mutation.
 
 Cache normalization ignores only the protocol-level `params._meta.progressToken`. Nested tool arguments are preserved. The `v2` cache namespace prevents reuse of older entries; existing entries expire normally.

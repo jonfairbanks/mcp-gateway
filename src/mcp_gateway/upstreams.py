@@ -7,6 +7,7 @@ import os
 import time
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
@@ -30,9 +31,7 @@ class SseEvent:
 
 class StreamableHTTPUpstream:
     MAX_SSE_LINES = 16384
-    MAX_SSE_LINE_BYTES = 1024 * 1024
     MAX_SSE_EVENTS = 1024
-    MAX_SSE_EVENT_BYTES = 2 * 1024 * 1024
 
     def __init__(
         self,
@@ -196,13 +195,13 @@ class StreamableHTTPUpstream:
     def _parse_sse_events(cls, raw_text: str) -> Iterator[SseEvent]:
         event_name = "message"
         data_lines: list[str] = []
-        event_bytes = 0
         event_count = 0
         line_count = 0
         # Avoid splitlines() and a second full list of event objects.
         for raw_line in io.StringIO(raw_text, newline=None):
             line_count += 1
-            if line_count > cls.MAX_SSE_LINES or len(raw_line.encode("utf-8")) > cls.MAX_SSE_LINE_BYTES:
+            # _read_body already bounds all line and event bytes, including framing.
+            if line_count > cls.MAX_SSE_LINES:
                 raise RuntimeError("HTTP upstream SSE line limit exceeded")
             line = raw_line.rstrip("\r\n")
             if not line:
@@ -213,7 +212,6 @@ class StreamableHTTPUpstream:
                     yield SseEvent(event=event_name, data="\n".join(data_lines))
                 event_name = "message"
                 data_lines = []
-                event_bytes = 0
                 continue
             if line.startswith(":"):
                 continue
@@ -225,9 +223,6 @@ class StreamableHTTPUpstream:
             if field == "event":
                 event_name = value or "message"
             elif field == "data":
-                event_bytes += len(value.encode("utf-8")) + 1
-                if event_bytes > cls.MAX_SSE_EVENT_BYTES:
-                    raise RuntimeError("HTTP upstream SSE event data limit exceeded")
                 data_lines.append(value)
         if data_lines:
             if event_count >= cls.MAX_SSE_EVENTS:
@@ -273,6 +268,9 @@ class StdioUpstream:
         self._read_limit_bytes = max(64 * 1024, read_limit_bytes)
         self._upstream_id = upstream_id
         self._on_stderr_line = on_stderr_line
+        self._initialize_payload: Optional[Dict[str, Any]] = None
+        self._initialize_complete = False
+        self._initialized = False
         self._process: Optional[asyncio.subprocess.Process] = None
         self._lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
@@ -284,6 +282,8 @@ class StdioUpstream:
                 return
             if self._process and self._process.returncode is not None:
                 await self._discard_dead_process()
+            self._initialize_complete = False
+            self._initialized = False
             # Only runtime necessities are inherited. Credentials must be explicitly
             # assigned to this upstream in its env mapping.
             inherited = {"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TMP", "TEMP", "SYSTEMROOT", "WINDIR"}
@@ -311,6 +311,8 @@ class StdioUpstream:
         self._process = None
 
     async def close(self) -> None:
+        self._initialize_complete = False
+        self._initialized = False
         if not self._process:
             return
         if self._process.returncode is None:
@@ -337,26 +339,18 @@ class StdioUpstream:
 
     async def call(self, payload: Dict[str, Any]) -> UpstreamResponse:
         async with self._lock:
-            await self.start()
-            assert self._process and self._process.stdin and self._process.stdout
-            expected_id = payload.get("id")
-            deadline = time.monotonic() + self._timeout
             try:
-                # Once write begins, a failure leaves the outcome unknown. Never replay
-                # the request; a later independent call may start a fresh process.
-                self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
-                await self._process.stdin.drain()
-                while True:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise asyncio.TimeoutError()
-                    line = await asyncio.wait_for(self._process.stdout.readline(), timeout=remaining)
-                    if not line:
-                        raise RuntimeError("Upstream stdio closed; request outcome unknown")
-                    data = json.loads(line.decode("utf-8"))
-                    if data.get("id") != expected_id:
-                        continue
-                    return UpstreamResponse(payload=data, success="error" not in data)
+                await self.start()
+                if payload.get("method") == "initialize":
+                    self._initialize_complete = False
+                    self._initialized = False
+                else:
+                    await self._ensure_initialized()
+                response = await self._call_locked(payload)
+                if payload.get("method") == "initialize" and self._valid_initialize_response(response):
+                    self._initialize_payload = deepcopy(payload)
+                    self._initialize_complete = True
+                return response
             except (BrokenPipeError, ConnectionResetError):
                 await self.close()
                 raise RuntimeError("Upstream stdio closed; request outcome unknown") from None
@@ -366,14 +360,57 @@ class StdioUpstream:
 
     async def notify(self, payload: Dict[str, Any]) -> None:
         async with self._lock:
-            await self.start()
-            assert self._process and self._process.stdin
             try:
-                self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
-                await self._process.stdin.drain()
+                await self.start()
+                await self._ensure_initialized()
+                if payload.get("method") != "notifications/initialized" or not self._initialized:
+                    await self._notify_locked(payload)
             except (BrokenPipeError, ConnectionResetError):
                 await self.close()
                 raise RuntimeError("Upstream stdio closed") from None
+            except (RuntimeError, asyncio.TimeoutError, asyncio.CancelledError):
+                await self.close()
+                raise
+
+    @staticmethod
+    def _valid_initialize_response(response: UpstreamResponse) -> bool:
+        result = response.payload.get("result")
+        return response.success and isinstance(result, dict) and is_supported_protocol_version(result.get("protocolVersion"))
+
+    async def _ensure_initialized(self) -> None:
+        # The caller holds _lock, so concurrent requests share one replacement
+        # handshake. Only initialization is repeated, never an uncertain tool call.
+        if self._initialize_payload is None or self._initialized:
+            return
+        if not self._initialize_complete:
+            response = await self._call_locked(self._initialize_payload)
+            if not self._valid_initialize_response(response):
+                raise RuntimeError("Upstream stdio initialization failed")
+            self._initialize_complete = True
+        await self._notify_locked({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        self._initialized = True
+
+    async def _notify_locked(self, payload: Dict[str, Any]) -> None:
+        assert self._process and self._process.stdin
+        self._process.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
+        await asyncio.wait_for(self._process.stdin.drain(), timeout=self._timeout)
+
+    async def _call_locked(self, payload: Dict[str, Any]) -> UpstreamResponse:
+        assert self._process and self._process.stdout
+        expected_id = payload.get("id")
+        deadline = time.monotonic() + self._timeout
+        await self._notify_locked(payload)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            line = await asyncio.wait_for(self._process.stdout.readline(), timeout=remaining)
+            if not line:
+                raise RuntimeError("Upstream stdio closed; request outcome unknown")
+            data = json.loads(line.decode("utf-8"))
+            if data.get("id") != expected_id:
+                continue
+            return UpstreamResponse(payload=data, success="error" not in data)
 
     async def _stream_stderr(self) -> None:
         if not self._process or not self._process.stderr:
