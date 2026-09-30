@@ -1384,7 +1384,7 @@ class Gateway:
                     return await self._finalize_request(
                         request_id=request_id,
                         method=method,
-                        response_payload=cached,
+                        response_payload={**cached, "id": routed.payload.get("id")},
                         success=True,
                         cache_hit=True,
                         latency_ms=timer.elapsed_ms(),
