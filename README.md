@@ -112,6 +112,7 @@ The checked-in example config is intentionally runnable and enables `context7` b
 
 - Deployment guide: [docs/deployment-guide.md](docs/deployment-guide.md)
 - Client configuration: [docs/client-configuration.md](docs/client-configuration.md)
+- Optional tool discovery: [docs/tool-discovery.md](docs/tool-discovery.md)
 - Operations guide: [docs/operations.md](docs/operations.md)
 - Configuration reference: [docs/configuration.md](docs/configuration.md)
 - Authentication: [docs/authentication.md](docs/authentication.md)

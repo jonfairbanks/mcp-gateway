@@ -16,6 +16,8 @@ gateway:
   allowed_origins: []
   public_tools_catalog: true
   public_metrics: true
+  # Enable /mcp/discovery for clients without deferred tool loading.
+  tool_discovery_enabled: false
 
 logging:
   stdout_json: true

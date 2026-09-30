@@ -10,6 +10,7 @@ from aiohttp import web
 
 from .auth import AuthUnavailableError
 from .config import AppConfig
+from .discovery import DISCOVERY_PATH
 from .gateway import Gateway
 from .jsonrpc import make_error_response
 from .logging import Logger
@@ -18,6 +19,7 @@ from .request_context import AuthenticatedPrincipal, RequestContext
 from .telemetry import GatewayTelemetry
 
 MAX_JSONRPC_BATCH_SIZE = 100
+MCP_PATHS = frozenset({"/mcp", DISCOVERY_PATH})
 
 
 class HttpServer:
@@ -66,7 +68,7 @@ class HttpServer:
                 error_type=type(exc).__name__,
                 error=str(exc) or type(exc).__name__,
             )
-            if request.path == "/mcp":
+            if request.path in MCP_PATHS:
                 response = web.json_response(make_error_response(None, -32603, "Internal error"), status=500)
                 return self._with_mcp_cors_headers(request, response)
             return self._rest_error(500, "InternalError", "Unexpected server error.")
@@ -74,7 +76,7 @@ class HttpServer:
     @web.middleware
     async def _origin_middleware(self, request: web.Request, handler):
         origins = request.headers.getall("Origin", [])
-        if request.path == "/mcp" and origins:
+        if request.path in MCP_PATHS and origins:
             if len(origins) != 1 or origins[0] not in self._config.gateway.allowed_origins:
                 return web.Response(status=403, text="Origin not allowed", headers={"Vary": "Origin"})
         return await handler(request)
@@ -287,7 +289,11 @@ class HttpServer:
                 principal, unauthorized = await self._authenticate(request, require_principal=strict_auth)
             if unauthorized is not None:
                 return None, unauthorized
-        request_context = RequestContext(client_id=client_id, principal=principal)
+        request_context = RequestContext(
+            client_id=client_id,
+            principal=principal,
+            tool_discovery=self._config.gateway.tool_discovery_enabled and getattr(request, "path", None) == DISCOVERY_PATH,
+        )
         blocked = await self._rate_limit(request_context)
         if blocked is not None:
             return None, blocked
@@ -335,7 +341,7 @@ class HttpServer:
         # Unit tests call handlers with SimpleNamespace request doubles that may
         # omit `.path`; treat those direct MCP handler calls as /mcp.
         request_path = getattr(request, "path", "/mcp")
-        if request_path != "/mcp":
+        if request_path not in MCP_PATHS:
             return response
         for header, value in self._mcp_cors_headers(request).items():
             if header == "Vary":
@@ -519,6 +525,13 @@ class HttpServer:
                 web.options("/mcp", self.mcp_options_handler),
             ]
         )
+        if self._config.gateway.tool_discovery_enabled:
+            routes.extend([
+                web.get(DISCOVERY_PATH, self.mcp_get_handler),
+                web.post(DISCOVERY_PATH, self.mcp_post_handler),
+                web.delete(DISCOVERY_PATH, self.mcp_delete_handler),
+                web.options(DISCOVERY_PATH, self.mcp_options_handler),
+            ])
         app.add_routes(routes)
         return app
 
