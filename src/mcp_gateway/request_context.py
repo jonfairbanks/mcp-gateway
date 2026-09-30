@@ -16,3 +16,4 @@ class AuthenticatedPrincipal:
 class RequestContext:
     client_id: Optional[str]
     principal: Optional[AuthenticatedPrincipal] = None
+    tool_discovery: bool = False
