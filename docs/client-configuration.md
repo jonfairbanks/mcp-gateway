@@ -31,3 +31,7 @@ http_headers = { "Authorization" = "Bearer <your-api-key>" }
 - the gateway currently supports MCP protocol versions `2025-03-26` and `2025-11-25`
 - discovery requests are aggregated across upstreams
 - `tools/call` is routed to the upstream that owns the tool
+
+## Optional Tool Discovery
+
+For clients that eagerly load every tool schema, see [Tool Discovery](tool-discovery.md) for the opt-in `/mcp/discovery` endpoint. Keep Codex on `/mcp` with native deferred loading.

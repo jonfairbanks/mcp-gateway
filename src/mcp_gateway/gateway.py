@@ -9,6 +9,15 @@ from uuid import UUID, uuid4
 from .auth import AuthService
 from .cache import TTLCache
 from .config import AppConfig, UpstreamConfig
+from .discovery import (
+    CALL_TOOL,
+    INSTRUCTIONS,
+    RESERVED_NAMES,
+    SEARCH_TOOL,
+    ToolDiscoveryIndex,
+    call_arguments,
+    discovery_tools,
+)
 from .jsonrpc import make_error_response, normalize_params
 from .logging import Logger, Timer
 from .postgres import PostgresStore
@@ -64,6 +73,7 @@ class RoutedRequest:
     tool_name: Optional[str]
     upstream: Optional[UpstreamConfig]
     cache_key: Optional[str]
+    discovery_index: Optional[ToolDiscoveryIndex] = None
 
 
 @dataclass
@@ -103,6 +113,8 @@ class Gateway:
         self._tool_alias_registry: Dict[str, str] = {}
         self._upstream_tools: Dict[str, list[str]] = {u.id: [] for u in config.upstreams}
         self._registry_lock = asyncio.Lock()
+        self._discovery_index: Optional[ToolDiscoveryIndex] = None
+        self._discovery_refresh_lock = asyncio.Lock()
         self._upstream_by_id: Dict[str, UpstreamConfig] = {u.id: u for u in config.upstreams}
         self._runtime = GatewayRuntimeState(config, self._upstream_by_id)
         self._server_capabilities: Dict[str, Any] = {}
@@ -244,11 +256,20 @@ class Gateway:
         )
 
     async def _apply_tool_registry_state(self, state: ToolRegistryState) -> None:
+        index = None
+        if self._config.gateway.tool_discovery_enabled:
+            conflicts = RESERVED_NAMES.intersection(state.registry)
+            if conflicts:
+                raise ValueError(f"Tool names reserved for discovery: {', '.join(sorted(conflicts))}")
+            index = await asyncio.to_thread(
+                ToolDiscoveryIndex, state.tools, state.registry, list(self._upstream_by_id)
+            )
         async with self._registry_lock:
             self._tool_registry = dict(state.registry)
             self._tool_payloads = [dict(tool) for tool in state.tools]
             self._tool_alias_registry = self._build_tool_alias_registry(state.registry)
             self._upstream_tools = {upstream_id: list(tool_names) for upstream_id, tool_names in state.upstream_tools.items()}
+            self._discovery_index = index
 
     def _cache_ttl_seconds(self, upstream: UpstreamConfig) -> int:
         ttl_minutes = upstream.cache_ttl_minutes or self._config.cache.default_ttl_minutes
@@ -497,11 +518,14 @@ class Gateway:
         requested_tool_name = self._get_tool_name(method, params)
         tool_name = requested_tool_name
         registry_upstream_id: Optional[str] = None
+        discovery_index = None
 
         if method == "tools/call" and tool_name:
             async with self._registry_lock:
                 resolved = self._resolve_tool_name(tool_name)
                 registry_upstream_id = self._tool_registry.get(resolved)
+                if request_context.tool_discovery:
+                    discovery_index = self._discovery_index
             if resolved != tool_name:
                 payload, params = self._replace_tool_name(payload, params, resolved)
                 tool_name = resolved
@@ -529,6 +553,7 @@ class Gateway:
             tool_name=tool_name,
             upstream=upstream,
             cache_key=cache_key,
+            discovery_index=discovery_index,
         )
 
     def _log_upstream_stderr(self, upstream_id: str, line: str) -> None:
@@ -797,6 +822,7 @@ class Gateway:
             client_id=request_context.client_id,
             auth_subject=principal.subject if principal else None,
             auth_scheme=principal.auth_scheme if principal else None,
+            tool_discovery=request_context.tool_discovery,
             cache_key=cache_key,
         )
 
@@ -929,8 +955,11 @@ class Gateway:
                     }
                 )
                 return make_error_response(payload.get("id"), -32003, message), False, upstream_errors
+            try:
+                await self._apply_tool_registry_state(registry_state)
+            except ValueError as exc:
+                return make_error_response(payload.get("id"), -32003, str(exc)), False, upstream_errors
             merged["tools"] = registry_state.tools
-            await self._apply_tool_registry_state(registry_state)
         elif method == "resources/list":
             seen = set()
             resources: list[Dict[str, Any]] = []
@@ -1170,6 +1199,62 @@ class Gateway:
         await self._apply_tool_registry_state(registry_state)
         self._server_capabilities = merged_capabilities
 
+    async def _ensure_discovery_index(self) -> ToolDiscoveryIndex:
+        if self._discovery_index is None:
+            async with self._discovery_refresh_lock:
+                if self._discovery_index is None:
+                    await self.warmup()
+        assert self._discovery_index is not None
+        return self._discovery_index
+
+    async def _local_discovery_result(
+        self, payload: Dict[str, Any], request_context: RequestContext, request_id: UUID,
+        response: Dict[str, Any], timer: Timer,
+    ) -> GatewayResult:
+        method = payload.get("method")
+        tool_name = self._get_tool_name(method, payload.get("params"))
+        await self._log_request_start(
+            request_id=request_id, method=method, params=payload.get("params"), raw_request=payload,
+            upstream_id=None, tool_name=tool_name, request_context=request_context, cache_key=None,
+        )
+        return await self._finalize_request(
+            request_id=request_id, method=method, response_payload=response, success="error" not in response,
+            cache_hit=False, latency_ms=timer.elapsed_ms(), upstream_id=None, tool_name=tool_name,
+            error=response.get("error"), extra_log_fields={"tool_discovery": True},
+        )
+
+    async def _prepare_discovery_request(
+        self, payload: Dict[str, Any], request_context: RequestContext, request_id: UUID,
+    ) -> tuple[Dict[str, Any], Optional[GatewayResult]]:
+        timer = Timer()
+        method, params = payload.get("method"), payload.get("params")
+        response = None
+        if method == "tools/list":
+            response = {"jsonrpc": "2.0", "id": payload.get("id"), "result": {
+                "tools": discovery_tools(list(self._upstream_by_id))
+            }}
+        elif method == "tools/call":
+            try:
+                if not isinstance(params, dict):
+                    raise ValueError("Invalid tool call")
+                if params.get("name") == CALL_TOOL:
+                    name, arguments = call_arguments(params.get("arguments"))
+                    await self._ensure_discovery_index()
+                    # Preserve outer request/parameter metadata (including progress tokens).
+                    return {**payload, "params": {**params, "name": name, "arguments": arguments}}, None
+                if params.get("name") != SEARCH_TOOL:
+                    raise ValueError("Use gateway_search_tools or gateway_call_tool on this endpoint")
+                index = await self._ensure_discovery_index()
+                text = index.search(params.get("arguments"))
+                response = {"jsonrpc": "2.0", "id": payload.get("id"), "result": {
+                    "content": [{"type": "text", "text": text}]
+                }}
+            except ValueError as exc:
+                response = make_error_response(payload.get("id"), -32602, str(exc))
+        if response is not None:
+            return payload, await self._local_discovery_result(payload, request_context, request_id, response, timer)
+        return payload, None
+
     async def handle(self, payload: Dict[str, Any], request_context: RequestContext) -> GatewayResult:
         request_id = uuid4()
         method = payload.get("method")
@@ -1198,6 +1283,10 @@ class Gateway:
                     error=error_payload.get("error"),
                 )
             self._telemetry.record_request(method)
+            if request_context.tool_discovery:
+                if not self._config.gateway.tool_discovery_enabled or (principal is None and self.auth_required()):
+                    error = make_error_response(payload.get("id"), -32010, "Discovery unavailable or unauthorized")
+                    return await self._local_discovery_result(payload, request_context, request_id, error, Timer())
 
             if method == "initialize":
                 await self._log_request_start(
@@ -1211,9 +1300,13 @@ class Gateway:
                     cache_key=None,
                 )
                 timer = Timer()
-                if self.is_ready():
+                if self.is_ready() or request_context.tool_discovery:
                     requested_protocol_version = params.get("protocolVersion") if isinstance(params, dict) else None
                     response_payload = self._initialize_result_payload(payload.get("id"), requested_protocol_version)
+                    if request_context.tool_discovery:
+                        result = response_payload["result"]
+                        result["capabilities"] = {**result["capabilities"], "tools": {}}
+                        result["instructions"] = INSTRUCTIONS
                     success = True
                 else:
                     response_payload, success = await self._fanout_initialize(payload)
@@ -1255,6 +1348,12 @@ class Gateway:
                     tool_name=None,
                 )
 
+            original_payload = payload
+            if request_context.tool_discovery:
+                payload, local_result = await self._prepare_discovery_request(payload, request_context, request_id)
+                if local_result is not None:
+                    return local_result
+                params = payload.get("params")
             routed = await self._route_request(payload, method, params, request_context)
             if not routed.upstream:
                 error_payload = make_error_response(payload.get("id"), -32000, "No upstream configured")
@@ -1274,7 +1373,7 @@ class Gateway:
                 request_id=request_id,
                 method=method,
                 params=routed.params,
-                raw_request=routed.payload,
+                raw_request=original_payload if request_context.tool_discovery else routed.payload,
                 upstream_id=routed.upstream.id,
                 tool_name=routed.tool_name,
                 request_context=request_context,
@@ -1354,6 +1453,20 @@ class Gateway:
                     error=denial_payload.get("error"),
                     extra_log_fields={"reason": denial_reason},
                 )
+
+            if request_context.tool_discovery and method == "tools/call":
+                timer = Timer()
+                try:
+                    if routed.discovery_index is None:
+                        raise ValueError("Tool catalog unavailable")
+                    routed.discovery_index.validate_arguments(routed.tool_name or "", routed.params["arguments"])
+                except ValueError as exc:
+                    response = make_error_response(payload.get("id"), -32602, str(exc))
+                    return await self._finalize_request(
+                        request_id=request_id, method=method, response_payload=response, success=False,
+                        cache_hit=False, latency_ms=timer.elapsed_ms(), upstream_id=routed.upstream.id,
+                        tool_name=routed.tool_name, error=response["error"],
+                    )
 
             if routed.payload.get("id") is None:
                 timer = Timer()
