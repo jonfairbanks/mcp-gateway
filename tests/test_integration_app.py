@@ -474,12 +474,23 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances(isolat
                                     "params": {"name": "http.echo", "arguments": {"value": "shared-cache"}},
                                 }
                                 first = await client_a.post("/mcp", headers=headers, json=payload)
-                                second = await client_b.post("/mcp", headers=headers, json=payload)
+                                second = await client_b.post("/mcp", headers=headers, json={**payload, "id": "call-2"})
+                                third = await client_a.post("/mcp", headers=headers, json={**payload, "id": 0})
 
                                 assert first.status == 200
                                 assert second.status == 200
-                                assert (await first.json())["result"]["content"][0]["text"] == "http.echo:shared-cache"
-                                assert (await second.json())["result"]["content"][0]["text"] == "http.echo:shared-cache"
+                                assert third.status == 200
+                                first_payload = await first.json()
+                                second_payload = await second.json()
+                                third_payload = await third.json()
+                                assert [first_payload["id"], second_payload["id"], third_payload["id"]] == [
+                                    "call-1",
+                                    "call-2",
+                                    0,
+                                ]
+                                assert first_payload["result"]["content"][0]["text"] == "http.echo:shared-cache"
+                                assert second_payload["result"] == first_payload["result"]
+                                assert third_payload["result"] == first_payload["result"]
                                 assert tool_call_count == 1
 
                                 second_key = await auth.issue_api_key(key_name="desktop")
