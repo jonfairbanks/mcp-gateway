@@ -71,3 +71,11 @@ Structured logs include upstream and tool-level detail. If an upstream fails war
 - If a tool call is blocked, look for JSON-RPC `-32001` with `error.data.category = policy_denied`.
 - If auth fails, verify the bearer token and `gateway.auth_mode`.
 - If a `stdio` upstream fails on startup, verify the CLI exists on the host and the `env` block is a YAML mapping, not a list.
+
+## Weekly Releases
+
+`Weekly Develop to Main` runs Mondays at 2:15 PM Pacific, including daylight saving time. It creates or reuses a direct `develop` → `main` PR, waits for all required checks, and enables protected auto-merge with a merge commit. It stops if the checked develop head changes. No unreleased commits means a successful no-op.
+
+Configure the repository Actions secret `PERSONAL_TOKEN` with Contents and Pull requests write access, plus read access to Actions checks and repository rules. PR creation and merging use this token so GitHub triggers the normal CI, semantic release, and Docker publication workflows. The promotion job watches the main push workflows for the exact merge commit; publication does not prove a live deployment.
+
+The workflow must reach `main` before its schedule is active. Manual dispatch is supported only from `main`. Missing credentials, checks, or publication runs fail the job without bypassing protection.
