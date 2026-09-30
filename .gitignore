@@ -11,3 +11,5 @@ config.yaml
 .env
 .DS_Store
 /plans
+
+node_modules/

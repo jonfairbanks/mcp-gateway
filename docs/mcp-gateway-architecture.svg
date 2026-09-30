@@ -36,9 +36,9 @@
   <rect class="gateway" x="300" y="334" width="250" height="70"/>
   <rect class="gateway" x="650" y="334" width="250" height="70"/>
   <text class="label" x="425" y="361" text-anchor="middle">Gateway Replica A</text>
-  <text class="small" x="425" y="384" text-anchor="middle">transport + auth + policy + routing</text>
+  <text class="small" x="425" y="384" text-anchor="middle">transport + auth + deny rules + routing</text>
   <text class="label" x="775" y="361" text-anchor="middle">Gateway Replica B</text>
-  <text class="small" x="775" y="384" text-anchor="middle">transport + auth + policy + routing</text>
+  <text class="small" x="775" y="384" text-anchor="middle">transport + auth + deny rules + routing</text>
 
   <rect class="group" x="70" y="484" width="500" height="220"/>
   <text class="label" x="320" y="508" text-anchor="middle">Upstream MCPs</text>
@@ -55,7 +55,7 @@
   <rect class="store" x="665" y="544" width="250" height="100"/>
   <rect class="gateway" x="945" y="544" width="150" height="100"/>
   <text class="label" x="790" y="574" text-anchor="middle">Shared Postgres</text>
-  <text class="small" x="790" y="602" text-anchor="middle">audit + cache + auth/RBAC</text>
+  <text class="small" x="790" y="602" text-anchor="middle">audit + cache + API keys</text>
   <text class="small" x="790" y="624" text-anchor="middle">+ shared rate limits</text>
   <text class="label" x="1020" y="582" text-anchor="middle">Prometheus Metrics</text>
   <text class="text" x="1020" y="606" text-anchor="middle">GET /metrics</text>

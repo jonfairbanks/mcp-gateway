@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
-import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from mcp_gateway.auth import AuthService
 from mcp_gateway.config import AppConfig, CacheConfig, GatewayConfig, LoggingConfig, UpstreamConfig
 from mcp_gateway.gateway import Gateway
 from mcp_gateway.logging import Logger
@@ -19,14 +18,6 @@ from mcp_gateway.telemetry import GatewayTelemetry
 
 FIXTURE_STDIO_UPSTREAM = Path(__file__).resolve().parent / "fixtures" / "fake_stdio_upstream.py"
 SCHEMA_SQL = Path(__file__).resolve().parents[1] / "schema.sql"
-TEST_DATABASE_DSN_ENV = "MCP_GATEWAY_TEST_DATABASE_URL"
-DEFAULT_DATABASE_DSN_ENV = "DATABASE_URL"
-TEST_DATABASE_DSN = os.getenv(TEST_DATABASE_DSN_ENV) or os.getenv(DEFAULT_DATABASE_DSN_ENV)
-
-pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_DSN,
-    reason=f"set {TEST_DATABASE_DSN_ENV} or {DEFAULT_DATABASE_DSN_ENV} to run Postgres integration tests",
-)
 
 
 def _gateway_config(http_endpoint: str) -> AppConfig:
@@ -36,7 +27,7 @@ def _gateway_config(http_endpoint: str) -> AppConfig:
             listen_port=0,
             auth_mode="single_shared",
             api_key="phase-one-secret",
-            bootstrap_admin_api_key="",
+            bootstrap_api_key="",
             allow_unauthenticated=False,
             public_tools_catalog=False,
             trusted_proxies=["127.0.0.1", "::1"],
@@ -96,30 +87,6 @@ async def _prepare_database(store: PostgresStore) -> None:
     assert store._pool is not None
     async with store._pool.connection() as conn:
         await conn.execute(SCHEMA_SQL.read_text(encoding="utf-8"))
-        await conn.execute(
-            """
-            TRUNCATE TABLE
-                mcp_responses,
-                mcp_denials,
-                mcp_requests,
-                mcp_cache,
-                gateway_rate_limits,
-                gateway_api_keys,
-                gateway_group_memberships,
-                gateway_group_integration_grants,
-                gateway_group_platform_grants,
-                gateway_groups,
-                gateway_users,
-                gateway_policy_state
-            CASCADE
-            """
-        )
-        await conn.execute(
-            """
-            INSERT INTO gateway_policy_state (singleton_key, policy_revision)
-            VALUES ('default', 0)
-            """
-        )
 
 
 async def _logged_tool_call_upstreams(store: PostgresStore) -> list[str]:
@@ -147,7 +114,7 @@ async def _logged_counts(store: PostgresStore) -> tuple[int, int]:
     return int(request_row["count"]), int(response_row["count"])
 
 
-def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging() -> None:
+def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging(isolated_database_dsn) -> None:
     async def run_test() -> None:
         http_app = web.Application()
         seen_methods: list[str] = []
@@ -214,8 +181,7 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging()
         http_app.router.add_post("/mcp", upstream_handler)
 
         async with TestServer(http_app) as upstream_server:
-            assert TEST_DATABASE_DSN is not None
-            store = PostgresStore(TEST_DATABASE_DSN)
+            store = PostgresStore(isolated_database_dsn)
             await store.start()
             await _prepare_database(store)
 
@@ -318,7 +284,7 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging()
     asyncio.run(run_test())
 
 
-def test_rate_limits_apply_across_two_gateway_instances_with_shared_postgres() -> None:
+def test_rate_limits_apply_across_two_gateway_instances_with_shared_postgres(isolated_database_dsn) -> None:
     async def run_test() -> None:
         http_app = web.Application()
 
@@ -360,8 +326,7 @@ def test_rate_limits_apply_across_two_gateway_instances_with_shared_postgres() -
         http_app.router.add_post("/mcp", upstream_handler)
 
         async with TestServer(http_app) as upstream_server:
-            assert TEST_DATABASE_DSN is not None
-            dsn = TEST_DATABASE_DSN
+            dsn = isolated_database_dsn
             store_a = PostgresStore(dsn)
             store_b = PostgresStore(dsn)
             await store_a.start()
@@ -406,7 +371,7 @@ def test_rate_limits_apply_across_two_gateway_instances_with_shared_postgres() -
     asyncio.run(run_test())
 
 
-def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> None:
+def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances(isolated_database_dsn) -> None:
     async def run_test() -> None:
         http_app = web.Application()
         tool_call_count = 0
@@ -463,8 +428,7 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> N
         http_app.router.add_post("/mcp", upstream_handler)
 
         async with TestServer(http_app) as upstream_server:
-            assert TEST_DATABASE_DSN is not None
-            dsn = TEST_DATABASE_DSN
+            dsn = isolated_database_dsn
             store_a = PostgresStore(dsn)
             store_b = PostgresStore(dsn)
             await store_a.start()
@@ -485,9 +449,8 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> N
             server_b = HttpServer(config, gateway_b, logger, telemetry_b)
 
             try:
-                user = await gateway_a.create_user(subject="alice", display_name="Alice", role="admin")
-                assert user is not None
-                issued = await gateway_a.issue_api_key_for_user(user_id=user["id"], key_name="laptop")
+                auth = AuthService(config, store_a, logger)
+                issued = await auth.issue_api_key(key_name="laptop")
                 headers = {"Authorization": f"Bearer {issued['api_key']}"}
 
                 await gateway_a.warmup()
@@ -501,8 +464,8 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> N
                                 me_b = await client_b.get("/v1/me", headers=headers)
                                 assert me_a.status == 200
                                 assert me_b.status == 200
-                                assert (await me_a.json())["subject"] == "alice"
-                                assert (await me_b.json())["subject"] == "alice"
+                                assert (await me_a.json())["subject"] == f"api_key:{issued['api_key_id']}"
+                                assert (await me_b.json())["subject"] == f"api_key:{issued['api_key_id']}"
 
                                 payload = {
                                     "jsonrpc": "2.0",
@@ -511,13 +474,37 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances() -> N
                                     "params": {"name": "http.echo", "arguments": {"value": "shared-cache"}},
                                 }
                                 first = await client_a.post("/mcp", headers=headers, json=payload)
-                                second = await client_b.post("/mcp", headers=headers, json=payload)
+                                second = await client_b.post("/mcp", headers=headers, json={**payload, "id": "call-2"})
+                                third = await client_a.post("/mcp", headers=headers, json={**payload, "id": 0})
 
                                 assert first.status == 200
                                 assert second.status == 200
-                                assert (await first.json())["result"]["content"][0]["text"] == "http.echo:shared-cache"
-                                assert (await second.json())["result"]["content"][0]["text"] == "http.echo:shared-cache"
+                                assert third.status == 200
+                                first_payload = await first.json()
+                                second_payload = await second.json()
+                                third_payload = await third.json()
+                                assert [first_payload["id"], second_payload["id"], third_payload["id"]] == [
+                                    "call-1",
+                                    "call-2",
+                                    0,
+                                ]
+                                assert first_payload["result"]["content"][0]["text"] == "http.echo:shared-cache"
+                                assert second_payload["result"] == first_payload["result"]
+                                assert third_payload["result"] == first_payload["result"]
                                 assert tool_call_count == 1
+
+                                second_key = await auth.issue_api_key(key_name="desktop")
+                                other_headers = {"Authorization": f"Bearer {second_key['api_key']}"}
+                                isolated = await client_b.post("/mcp", headers=other_headers, json=payload)
+                                assert isolated.status == 200
+                                assert "result" in await isolated.json()
+                                assert tool_call_count == 2
+
+                                await auth.revoke_api_key(issued["api_key_id"])
+                                for client in (client_a, client_b):
+                                    denied = await client.post("/mcp", headers=headers, json=payload)
+                                    assert denied.status == 401
+                                assert tool_call_count == 2
             finally:
                 await gateway_a.close()
                 await gateway_b.close()

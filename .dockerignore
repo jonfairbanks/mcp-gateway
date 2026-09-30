@@ -17,3 +17,9 @@ docker-compose.override.yml
 TODO.md
 LICENSE
 *.egg-info
+
+.env
+.env.*
+config.yaml
+**/node_modules
+plans
