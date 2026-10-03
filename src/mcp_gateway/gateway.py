@@ -256,14 +256,12 @@ class Gateway:
         )
 
     async def _apply_tool_registry_state(self, state: ToolRegistryState) -> None:
-        index = None
-        if self._config.gateway.tool_discovery_enabled:
-            conflicts = RESERVED_NAMES.intersection(state.registry)
-            if conflicts:
-                raise ValueError(f"Tool names reserved for discovery: {', '.join(sorted(conflicts))}")
-            index = await asyncio.to_thread(
-                ToolDiscoveryIndex, state.tools, state.registry, list(self._upstream_by_id)
-            )
+        conflicts = RESERVED_NAMES.intersection(state.registry)
+        if conflicts:
+            raise ValueError(f"Tool names reserved for discovery: {', '.join(sorted(conflicts))}")
+        index = await asyncio.to_thread(
+            ToolDiscoveryIndex, state.tools, state.registry, list(self._upstream_by_id)
+        )
         async with self._registry_lock:
             self._tool_registry = dict(state.registry)
             self._tool_payloads = [dict(tool) for tool in state.tools]
@@ -1283,10 +1281,9 @@ class Gateway:
                     error=error_payload.get("error"),
                 )
             self._telemetry.record_request(method)
-            if request_context.tool_discovery:
-                if not self._config.gateway.tool_discovery_enabled or (principal is None and self.auth_required()):
-                    error = make_error_response(payload.get("id"), -32010, "Discovery unavailable or unauthorized")
-                    return await self._local_discovery_result(payload, request_context, request_id, error, Timer())
+            if request_context.tool_discovery and principal is None and self.auth_required():
+                error = make_error_response(payload.get("id"), -32010, "Unauthorized")
+                return await self._local_discovery_result(payload, request_context, request_id, error, Timer())
 
             if method == "initialize":
                 await self._log_request_start(

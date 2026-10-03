@@ -28,7 +28,6 @@ upstreams:
     assert config.gateway.bootstrap_api_key == ""
     assert config.gateway.public_tools_catalog is False
     assert config.gateway.public_metrics is False
-    assert config.gateway.tool_discovery_enabled is False
     assert config.gateway.tracing_enabled is False
     assert config.gateway.readiness_mode == "any"
     assert config.gateway.required_ready_upstreams == []
@@ -59,17 +58,6 @@ upstreams:
     config = load_config(str(config_file))
     assert len(config.upstreams) == 1
     assert config.upstreams[0].http_serialize_requests is True
-
-
-@pytest.mark.parametrize("setting, expected", [("true", True), ("false", False), ("maybe", None)])
-def test_tool_discovery_requires_a_boolean(tmp_path, setting, expected) -> None:
-    config_file = tmp_path / "config.yaml"
-    config_file.write_text(f"gateway:\n  api_key: secret\n  tool_discovery_enabled: {setting}\n")
-    if expected is None:
-        with pytest.raises(ValueError, match="tool_discovery_enabled"):
-            load_config(str(config_file))
-    else:
-        assert load_config(str(config_file)).gateway.tool_discovery_enabled is expected
 
 
 def test_rejects_legacy_http_sse_transport(tmp_path) -> None:

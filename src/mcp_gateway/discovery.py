@@ -12,7 +12,8 @@ import orjson
 SEARCH_TOOL = "gateway_search_tools"
 CALL_TOOL = "gateway_call_tool"
 RESERVED_NAMES = frozenset({SEARCH_TOOL, CALL_TOOL})
-DISCOVERY_PATH = "/mcp/discovery"
+DISCOVERY_PATH = "/mcp"
+FULL_PATH = "/mcp/full"
 MAX_QUERY_LENGTH = 512
 MAX_RESULTS = 10
 MAX_RESULT_BYTES = 64 * 1024
@@ -142,14 +143,14 @@ class ToolDiscoveryIndex:
             if name not in self._validators:
                 schema = self._tools[name].get("inputSchema", {})
                 if not isinstance(schema, (dict, bool)):
-                    raise ValueError("Tool input schema cannot be validated; use the native /mcp endpoint")
+                    raise ValueError("Tool input schema cannot be validated; use the /mcp/full endpoint")
                 cls = validator_for(schema)
                 cls.check_schema(schema)
                 # Explicitly disable retrieval of remote $ref resources from upstream schemas.
                 self._validators[name] = cls(schema, registry=Registry())
             error = next(self._validators[name].iter_errors(arguments), None)
         except (SchemaError, Unresolvable) as exc:
-            raise ValueError("Tool input schema cannot be validated; use the native /mcp endpoint") from exc
+            raise ValueError("Tool input schema cannot be validated; use the /mcp/full endpoint") from exc
         if error is not None:
             # Validation messages can contain argument values; do not include them in errors or logs.
             raise ValueError("Arguments do not match the tool input schema")
@@ -189,11 +190,11 @@ class ToolDiscoveryIndex:
         omitted = 0
         for _, name in scores[:limit]:
             candidate = {"tools": result["tools"] + [self._tools[name]], "omitted_count": MAX_RESULTS,
-                         "message": "Some schemas exceed the result budget; narrow the search or use /mcp."}
+                         "message": "Some schemas exceed the result budget; narrow the search or use /mcp/full."}
             if len(orjson.dumps(candidate)) <= MAX_RESULT_BYTES:
                 result["tools"].append(self._tools[name])
             else:
                 omitted += 1
         if omitted:
-            result.update(omitted_count=omitted, message="Some schemas exceed the result budget; narrow the search or use /mcp.")
+            result.update(omitted_count=omitted, message="Some schemas exceed the result budget; narrow the search or use /mcp/full.")
         return orjson.dumps(result).decode("utf-8")

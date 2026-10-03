@@ -10,7 +10,7 @@ from aiohttp import web
 
 from .auth import AuthUnavailableError
 from .config import AppConfig
-from .discovery import DISCOVERY_PATH
+from .discovery import DISCOVERY_PATH, FULL_PATH
 from .gateway import Gateway
 from .jsonrpc import make_error_response
 from .logging import Logger
@@ -19,7 +19,7 @@ from .request_context import AuthenticatedPrincipal, RequestContext
 from .telemetry import GatewayTelemetry
 
 MAX_JSONRPC_BATCH_SIZE = 100
-MCP_PATHS = frozenset({"/mcp", DISCOVERY_PATH})
+MCP_PATHS = frozenset({DISCOVERY_PATH, FULL_PATH})
 
 
 class HttpServer:
@@ -292,7 +292,7 @@ class HttpServer:
         request_context = RequestContext(
             client_id=client_id,
             principal=principal,
-            tool_discovery=self._config.gateway.tool_discovery_enabled and getattr(request, "path", None) == DISCOVERY_PATH,
+            tool_discovery=getattr(request, "path", None) == DISCOVERY_PATH,
         )
         blocked = await self._rate_limit(request_context)
         if blocked is not None:
@@ -517,20 +517,12 @@ class HttpServer:
             web.get("/metrics", self.metrics_handler),
             web.get("/v1/me", self.me_handler),
         ]
-        routes.extend(
-            [
-                web.get("/mcp", self.mcp_get_handler),
-                web.post("/mcp", self.mcp_post_handler),
-                web.delete("/mcp", self.mcp_delete_handler),
-                web.options("/mcp", self.mcp_options_handler),
-            ]
-        )
-        if self._config.gateway.tool_discovery_enabled:
+        for path in (DISCOVERY_PATH, FULL_PATH):
             routes.extend([
-                web.get(DISCOVERY_PATH, self.mcp_get_handler),
-                web.post(DISCOVERY_PATH, self.mcp_post_handler),
-                web.delete(DISCOVERY_PATH, self.mcp_delete_handler),
-                web.options(DISCOVERY_PATH, self.mcp_options_handler),
+                web.get(path, self.mcp_get_handler),
+                web.post(path, self.mcp_post_handler),
+                web.delete(path, self.mcp_delete_handler),
+                web.options(path, self.mcp_options_handler),
             ])
         app.add_routes(routes)
         return app

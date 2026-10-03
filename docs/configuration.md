@@ -35,7 +35,6 @@ Operational guidance:
 - `allowed_origins` defaults to `[]`. MCP requests with an `Origin` header must match an exact HTTP(S) origin in this list, such as `https://client.example.com`. Native clients without `Origin` remain supported. Wildcards and `null` are rejected.
 - `public_tools_catalog` default `false`; when `true`, `GET /tools` skips auth but still uses rate limiting
 - `public_metrics` default `false`; when `true`, `GET /metrics` skips auth
-- `tool_discovery_enabled` default `false`; adds `/mcp/discovery` with search and call wrappers. See [Tool Discovery](tool-discovery.md).
 - `tracing_enabled` default `false`; when `true`, OTEL exporter environment variables may activate tracing/export
 - `readiness_mode` default `any`; supported values are `any`, `required`, and `threshold`
 - `required_ready_upstreams` default `[]`; required when `readiness_mode` is `required`
@@ -47,6 +46,8 @@ Operational guidance:
 - `rate_limit_per_minute` default `120`
 - `circuit_breaker_fail_threshold` default `20`
 - `circuit_breaker_open_seconds` default `30`
+
+Both `/mcp` (compact search and call wrappers) and `/mcp/full` (full permitted catalog) are always available. Clients choose through their connection URL. See [Tool Discovery](tool-discovery.md).
 
 Deployment notes:
 

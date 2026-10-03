@@ -1014,6 +1014,8 @@ def test_build_app_exposes_runtime_and_profile_without_key_management() -> None:
     assert "/v1/me" in route_paths
     assert "/v1/me/api-keys" not in route_paths
     assert "/mcp" in route_paths
+    assert "/mcp/full" in route_paths
+    assert "/mcp/discovery" not in route_paths
     assert "/v1/admin/users" not in route_paths
     assert "/v1/admin/groups" not in route_paths
 
