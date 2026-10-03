@@ -47,7 +47,6 @@ class GatewayConfig:
     required_ready_upstreams: List[str] = field(default_factory=list)
     readiness_min_healthy_upstreams: Optional[int] = None
     readiness_min_healthy_percent: Optional[int] = None
-    tool_discovery_enabled: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
@@ -80,7 +79,6 @@ class GatewayConfig:
             ],
             readiness_min_healthy_upstreams=_optional_int(_get(data, "readiness_min_healthy_upstreams", None)),
             readiness_min_healthy_percent=_optional_int(_get(data, "readiness_min_healthy_percent", None)),
-            tool_discovery_enabled=_boolean(_get(data, "tool_discovery_enabled", False), "tool_discovery_enabled"),
         )
 
 

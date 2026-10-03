@@ -292,7 +292,7 @@ class HttpServer:
         request_context = RequestContext(
             client_id=client_id,
             principal=principal,
-            tool_discovery=self._config.gateway.tool_discovery_enabled and getattr(request, "path", None) == DISCOVERY_PATH,
+            tool_discovery=getattr(request, "path", None) == DISCOVERY_PATH,
         )
         blocked = await self._rate_limit(request_context)
         if blocked is not None:
@@ -525,13 +525,12 @@ class HttpServer:
                 web.options("/mcp", self.mcp_options_handler),
             ]
         )
-        if self._config.gateway.tool_discovery_enabled:
-            routes.extend([
-                web.get(DISCOVERY_PATH, self.mcp_get_handler),
-                web.post(DISCOVERY_PATH, self.mcp_post_handler),
-                web.delete(DISCOVERY_PATH, self.mcp_delete_handler),
-                web.options(DISCOVERY_PATH, self.mcp_options_handler),
-            ])
+        routes.extend([
+            web.get(DISCOVERY_PATH, self.mcp_get_handler),
+            web.post(DISCOVERY_PATH, self.mcp_post_handler),
+            web.delete(DISCOVERY_PATH, self.mcp_delete_handler),
+            web.options(DISCOVERY_PATH, self.mcp_options_handler),
+        ])
         app.add_routes(routes)
         return app
 

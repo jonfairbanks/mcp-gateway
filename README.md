@@ -10,20 +10,16 @@ It is intended for operators and platform engineers who need to:
 - share cache and audit state across replicas
 - observe tool usage and upstream health
 
-The gateway speaks MCP over `POST /mcp` and the optional `POST /mcp/discovery` endpoint. It supports MCP protocol versions `2025-03-26` and `2025-11-25`, defaulting to `2025-11-25`.
+The gateway speaks MCP over `POST /mcp` and `POST /mcp/discovery`. It supports MCP protocol versions `2025-03-26` and `2025-11-25`, defaulting to `2025-11-25`.
 
 ## Choose an Endpoint
 
-Use `/mcp/discovery` for a smaller initial tool catalog, including in Codex. It advertises two wrappers that search for tool schemas and call the selected tool. Enable it in the gateway config, then restart the gateway:
+Both endpoints are always available and use the same bearer token. Choose the URL that fits your client:
 
-```yaml
-gateway:
-  tool_discovery_enabled: true
-```
+- `/mcp` advertises the full permitted tool catalog. Use it when you want individual tools exposed directly or your client handles native deferred tool discovery.
+- `/mcp/discovery` advertises two wrappers to search for tool schemas and call the selected tool. Use it when you prefer a compact initial catalog, including in Codex. Each search adds a request, so it does not guarantee faster execution or lower context use than native client discovery.
 
-Point the client's MCP URL at `/mcp/discovery` with the same bearer token. The endpoint is disabled by default and returns 404 until enabled. Each search adds a request; compact discovery does not guarantee faster tool execution.
-
-Use `/mcp` for the full permitted catalog, native client tool discovery, or clients that need individual tools advertised directly. See [Client Configuration](docs/client-configuration.md) for examples and [Tool Discovery](docs/tool-discovery.md) for limits and fallback behavior.
+See [Client Configuration](docs/client-configuration.md) for examples and [Tool Discovery](docs/tool-discovery.md) for limits and fallback behavior.
 
 <img src="docs/mcp-gateway-architecture.svg" alt="MCP Gateway Architecture" width="75%">
 
@@ -33,7 +29,7 @@ Use `/mcp` for the full permitted catalog, native client tool discovery, or clie
 
 For MCP clients:
 
-- offers the full catalog at `POST /mcp` and optional compact discovery at `POST /mcp/discovery`
+- offers the full catalog at `POST /mcp` and compact discovery at `POST /mcp/discovery`
 - fans out discovery requests such as `initialize`, `tools/list`, `resources/list`, and `prompts/list`
 - routes `tools/call` to one upstream based on tool ownership
 
@@ -125,7 +121,7 @@ The checked-in example config is intentionally runnable and enables `context7` b
 
 - Deployment guide: [docs/deployment-guide.md](docs/deployment-guide.md)
 - Client configuration: [docs/client-configuration.md](docs/client-configuration.md)
-- Optional tool discovery: [docs/tool-discovery.md](docs/tool-discovery.md)
+- Tool discovery: [docs/tool-discovery.md](docs/tool-discovery.md)
 - Operations guide: [docs/operations.md](docs/operations.md)
 - Configuration reference: [docs/configuration.md](docs/configuration.md)
 - Authentication: [docs/authentication.md](docs/authentication.md)

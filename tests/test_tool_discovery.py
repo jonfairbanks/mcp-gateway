@@ -61,10 +61,9 @@ def context(discovery=True, key=None):
     return RequestContext("test-client", AuthenticatedPrincipal("gateway", "shared_bearer", api_key_id=key), discovery)
 
 
-async def fixture(enabled=True, tools=None, warm=True):
+async def fixture(tools=None, warm=True):
     upstream = _upstream("fixture", deny_tools=["denied_fixture"])
     config = _config_with_upstreams([upstream])
-    config.gateway.tool_discovery_enabled = enabled
     config.gateway.rate_limit_per_minute = 10000
     config.cache.allowed_tools = ["read_fixture"]
     store, logger = AuditStore(), RecordingLogger()
@@ -118,17 +117,17 @@ def test_compact_catalog_cold_start_and_single_flight_warmup():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_native_endpoint_remains_full_catalog_and_compact_route_is_opt_in(enabled):
+def test_both_endpoints_are_available_without_discovery_configuration():
     async def run():
-        gateway, config, _, _, calls = await fixture(enabled=enabled)
+        gateway, config, _, _, calls = await fixture()
         try:
             async with TestClient(TestServer(HttpServer(config, gateway, RecordingLogger(), gateway._telemetry).build_app())) as client:
                 p = {"jsonrpc": "2.0", "id": 9, "method": "tools/list"}
                 async with client.post("/mcp", json=p, headers={"Authorization": "Bearer secret"}) as response:
                     assert (await response.json())["result"]["tools"] == [READ_TOOL]
                 async with client.post("/mcp/discovery", json=p, headers={"Authorization": "Bearer secret"}) as response:
-                    assert response.status == (200 if enabled else 404)
+                    assert response.status == 200
+                    assert {tool["name"] for tool in (await response.json())["result"]["tools"]} == {SEARCH_TOOL, CALL_TOOL}
                 assert calls == []
         finally:
             await gateway.close()
