@@ -61,10 +61,9 @@ def context(discovery=True, key=None):
     return RequestContext("test-client", AuthenticatedPrincipal("gateway", "shared_bearer", api_key_id=key), discovery)
 
 
-async def fixture(enabled=True, tools=None, warm=True):
+async def fixture(tools=None, warm=True):
     upstream = _upstream("fixture", deny_tools=["denied_fixture"])
     config = _config_with_upstreams([upstream])
-    config.gateway.tool_discovery_enabled = enabled
     config.gateway.rate_limit_per_minute = 10000
     config.cache.allowed_tools = ["read_fixture"]
     store, logger = AuditStore(), RecordingLogger()
@@ -99,12 +98,12 @@ def test_compact_catalog_cold_start_and_single_flight_warmup():
         try:
             async with TestClient(TestServer(HttpServer(config, gateway, RecordingLogger(), gateway._telemetry).build_app())) as client:
                 headers = {"Authorization": "Bearer secret"}
-                async with client.post("/mcp/discovery", json={"jsonrpc": "2.0", "id": "init", "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}, headers=headers) as response:
+                async with client.post("/mcp", json={"jsonrpc": "2.0", "id": "init", "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}, headers=headers) as response:
                     body = await response.json()
                     assert body["result"]["protocolVersion"] == "2025-03-26"
                     assert body["result"]["instructions"] == INSTRUCTIONS
                     assert "tools" in body["result"]["capabilities"]
-                async with client.post("/mcp/discovery", json={"jsonrpc": "2.0", "id": 0, "method": "tools/list"}, headers=headers) as response:
+                async with client.post("/mcp", json={"jsonrpc": "2.0", "id": 0, "method": "tools/list"}, headers=headers) as response:
                     body = await response.json()
                     assert body["id"] == 0
                     assert {x["name"] for x in body["result"]["tools"]} == {SEARCH_TOOL, CALL_TOOL}
@@ -118,17 +117,54 @@ def test_compact_catalog_cold_start_and_single_flight_warmup():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_native_endpoint_remains_full_catalog_and_compact_route_is_opt_in(enabled):
+def test_both_endpoints_are_available_without_discovery_configuration():
     async def run():
-        gateway, config, _, _, calls = await fixture(enabled=enabled)
+        gateway, config, _, _, calls = await fixture()
         try:
             async with TestClient(TestServer(HttpServer(config, gateway, RecordingLogger(), gateway._telemetry).build_app())) as client:
                 p = {"jsonrpc": "2.0", "id": 9, "method": "tools/list"}
-                async with client.post("/mcp", json=p, headers={"Authorization": "Bearer secret"}) as response:
+                async with client.post("/mcp/full", json=p, headers={"Authorization": "Bearer secret"}) as response:
                     assert (await response.json())["result"]["tools"] == [READ_TOOL]
-                async with client.post("/mcp/discovery", json=p, headers={"Authorization": "Bearer secret"}) as response:
-                    assert response.status == (200 if enabled else 404)
+                async with client.post("/mcp", json=p, headers={"Authorization": "Bearer secret"}) as response:
+                    assert response.status == 200
+                    assert {tool["name"] for tool in (await response.json())["result"]["tools"]} == {SEARCH_TOOL, CALL_TOOL}
+                assert calls == []
+        finally:
+            await gateway.close()
+    asyncio.run(run())
+
+
+def test_endpoint_modes_preserve_direct_and_wrapped_execution():
+    async def run():
+        gateway, config, _, _, calls = await fixture()
+        try:
+            async with TestClient(TestServer(HttpServer(config, gateway, RecordingLogger(), gateway._telemetry).build_app())) as client:
+                headers = {"Authorization": "Bearer secret"}
+                direct = payload("read_fixture", {"value": "direct"}, 31)
+                async with client.post("/mcp", json=direct, headers=headers) as response:
+                    body = await response.json()
+                    assert body["id"] == 31 and body["error"]["code"] == -32602
+                assert calls == []
+                async with client.post("/mcp/full", json=direct, headers=headers) as response:
+                    body = await response.json()
+                    assert body["id"] == 31 and body["result"] == RESULT
+                async with client.post("/mcp", json=wrapped({"value": "wrapped"}, request_id=32), headers=headers) as response:
+                    body = await response.json()
+                    assert body["id"] == 32 and body["result"] == RESULT
+                assert [call[1]["params"]["name"] for call in calls] == ["read_fixture", "read_fixture"]
+        finally:
+            await gateway.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "DELETE", "OPTIONS"])
+def test_removed_discovery_endpoint_returns_404(method):
+    async def run():
+        gateway, config, _, _, calls = await fixture()
+        try:
+            async with TestClient(TestServer(HttpServer(config, gateway, RecordingLogger(), gateway._telemetry).build_app())) as client:
+                async with client.request(method, "/mcp/discovery", json=wrapped(), headers={"Authorization": "Bearer secret"}) as response:
+                    assert response.status == 404
                 assert calls == []
         finally:
             await gateway.close()
@@ -142,21 +178,21 @@ def test_discovery_http_security_cors_rate_limits_and_notifications():
         config.gateway.rate_limit_per_minute = 4
         try:
             async with TestClient(TestServer(HttpServer(config, gateway, RecordingLogger(), gateway._telemetry).build_app())) as client:
-                async with client.post("/mcp/discovery", json=wrapped()) as response:
+                async with client.post("/mcp", json=wrapped()) as response:
                     assert response.status == 401
-                async with client.post("/mcp/discovery", json=wrapped(), headers={"Authorization": "Bearer secret", "Origin": "https://evil.example"}) as response:
+                async with client.post("/mcp", json=wrapped(), headers={"Authorization": "Bearer secret", "Origin": "https://evil.example"}) as response:
                     assert response.status == 403
                 headers = {"Authorization": "Bearer secret", "Origin": "https://client.example"}
-                async with client.options("/mcp/discovery", headers=headers) as response:
+                async with client.options("/mcp", headers=headers) as response:
                     assert response.status == 204 and response.headers["Access-Control-Allow-Origin"] == "https://client.example"
-                async with client.post("/mcp/discovery", data="not json", headers=headers) as response:
+                async with client.post("/mcp", data="not json", headers=headers) as response:
                     assert response.status == 400 and response.headers["Access-Control-Allow-Origin"] == "https://client.example"
                 notification = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-                async with client.post("/mcp/discovery", json=notification, headers=headers) as response:
+                async with client.post("/mcp", json=notification, headers=headers) as response:
                     assert response.status == 202
-                async with client.post("/mcp/discovery", json=payload(), headers=headers) as response:
+                async with client.post("/mcp", json=payload(), headers=headers) as response:
                     assert response.status == 200
-                async with client.post("/mcp/discovery", json=payload(), headers=headers) as response:
+                async with client.post("/mcp", json=payload(), headers=headers) as response:
                     assert response.status == 429
                 assert all(x[1]["method"] != "tools/call" for x in calls)
         finally:

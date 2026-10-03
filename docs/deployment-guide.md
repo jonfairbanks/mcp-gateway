@@ -133,7 +133,8 @@ Store the displayed secret once. The gateway only stores its hash.
 
 ### Core endpoints
 
-- `POST /mcp` MCP transport endpoint
+- `POST /mcp` compact discovery endpoint
+- `POST /mcp/full` full tool catalog endpoint
 - `GET /tools` lightweight tool catalog
 - `GET /metrics` Prometheus/OpenMetrics scrape endpoint
 - `GET /healthz` liveness endpoint

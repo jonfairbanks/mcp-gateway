@@ -147,7 +147,8 @@ def test_allowed_origins_require_exact_web_origins(origin):
 
 
 @pytest.mark.parametrize("method", ["POST", "OPTIONS", "GET", "DELETE"])
-def test_mcp_rejects_unapproved_origins_before_dispatch(method):
+@pytest.mark.parametrize("endpoint", ["/mcp", "/mcp/full"])
+def test_mcp_rejects_unapproved_origins_before_dispatch(method, endpoint):
     async def run():
         config = _config_with_upstreams([_upstream()])
         config.gateway.allow_unauthenticated = True
@@ -158,14 +159,14 @@ def test_mcp_rejects_unapproved_origins_before_dispatch(method):
         server = HttpServer(config, gateway, Logger(False), telemetry)
         async with TestClient(TestServer(server.build_app())) as client:
             for origin in ["https://other.example", "null", "https://client.example.evil"]:
-                response = await client.request(method, "/mcp", headers={"Origin": origin})
+                response = await client.request(method, endpoint, headers={"Origin": origin})
                 assert response.status == 403
                 assert "Access-Control-Allow-Origin" not in response.headers
-            response = await client.options("/mcp", headers={"Origin": "https://client.example", "Access-Control-Request-Headers": "x-unapproved"})
+            response = await client.options(endpoint, headers={"Origin": "https://client.example", "Access-Control-Request-Headers": "x-unapproved"})
             assert response.status == 204
             assert response.headers["Access-Control-Allow-Origin"] == "https://client.example"
             assert "x-unapproved" not in response.headers["Access-Control-Allow-Headers"]
-            native = await client.options("/mcp")
+            native = await client.options(endpoint)
             assert native.status == 204
             assert "Access-Control-Allow-Origin" not in native.headers
         gateway.handle.assert_not_awaited()

@@ -79,7 +79,7 @@ def test_memory_cache_ids_through_authenticated_http(second_id: int | str) -> No
                 replies = []
                 for request_id in [99, second_id, "third-request"]:
                     async with client.post(
-                        "/mcp", json=_request(request_id), headers={"Authorization": "Bearer secret"}
+                        "/mcp/full", json=_request(request_id), headers={"Authorization": "Bearer secret"}
                     ) as response:
                         assert response.status == 200
                         replies.append(await response.json())

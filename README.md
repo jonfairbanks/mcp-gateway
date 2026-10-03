@@ -10,7 +10,23 @@ It is intended for operators and platform engineers who need to:
 - share cache and audit state across replicas
 - observe tool usage and upstream health
 
-The gateway speaks MCP over `POST /mcp` and currently supports MCP protocol versions `2025-03-26` and `2025-11-25`, defaulting to `2025-11-25`.
+The gateway speaks MCP over `POST /mcp` and `POST /mcp/full`. It supports MCP protocol versions `2025-03-26` and `2025-11-25`, defaulting to `2025-11-25`.
+
+## Choose an Endpoint
+
+Both endpoints are always available and use the same bearer token:
+
+- `/mcp` advertises two wrappers to search for tool schemas and call the selected tool. Start here for a small catalog, especially when your client's native tool discovery behavior is uncertain.
+- `/mcp/full` advertises the full permitted catalog for direct tool calls. Use it for clients with native deferred tool discovery, or workflows that need individual tools exposed directly.
+
+| Client | Recommended Endpoint | Why |
+| --- | --- | --- |
+| Codex | `/mcp` | Tested compact discovery; native schema deferral varies by version and model. |
+| Claude Code | `/mcp/full` with native tool search active | The client searches deferred schemas and calls individual tools directly. |
+| GitHub Copilot in VS Code | `/mcp/full` with supported models and tool search enabled | Native search avoids the gateway search round trip. |
+| Other clients | `/mcp` | A small catalog without relying on native schema deferral. |
+
+Compact discovery adds a gateway search round trip. A full schema catalog does not necessarily enter the model's prompt: clients may defer schemas until needed. Neither endpoint guarantees faster execution or lower context use. See [Client Configuration](docs/client-configuration.md) for client recommendations and [Tool Discovery](docs/tool-discovery.md) for limits.
 
 <img src="docs/mcp-gateway-architecture.svg" alt="MCP Gateway Architecture" width="75%">
 
@@ -20,8 +36,8 @@ The gateway speaks MCP over `POST /mcp` and currently supports MCP protocol vers
 
 For MCP clients:
 
-- presents one MCP endpoint at `POST /mcp`
-- fans out discovery requests such as `initialize`, `tools/list`, `resources/list`, and `prompts/list`
+- offers compact discovery at `POST /mcp` and the full catalog at `POST /mcp/full`
+- serves compact tool discovery locally and fans out full-catalog discovery to upstreams
 - routes `tools/call` to one upstream based on tool ownership
 
 For operators:
@@ -112,7 +128,7 @@ The checked-in example config is intentionally runnable and enables `context7` b
 
 - Deployment guide: [docs/deployment-guide.md](docs/deployment-guide.md)
 - Client configuration: [docs/client-configuration.md](docs/client-configuration.md)
-- Optional tool discovery: [docs/tool-discovery.md](docs/tool-discovery.md)
+- Tool discovery: [docs/tool-discovery.md](docs/tool-discovery.md)
 - Operations guide: [docs/operations.md](docs/operations.md)
 - Configuration reference: [docs/configuration.md](docs/configuration.md)
 - Authentication: [docs/authentication.md](docs/authentication.md)
