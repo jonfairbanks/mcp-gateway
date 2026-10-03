@@ -2,8 +2,6 @@
 
 Both `/mcp` and `/mcp/full` are always available. Start with `/mcp` for a compact catalog that does not rely on native schema deferral. Choose `/mcp/full` for direct tool calls or native deferred discovery. See [Client Configuration](client-configuration.md) for client recommendations.
 
-**Migration:** Direct-call clients move from `/mcp` to `/mcp/full`; compact clients move from `/mcp/discovery` to `/mcp`. The old compact URL is removed, with no alias.
-
 Point the client's MCP connection at your chosen URL with the same bearer token, then reconnect the client to refresh its tools. The compact endpoint advertises two tools:
 
 - `gateway_search_tools`: Search locally with `query`, optional `limit` (1–10, default 5), and optional `upstream` integration ID. Results include tool names, input schemas, and annotations.

@@ -28,8 +28,6 @@ Both endpoints are always available and use the same bearer token:
 
 Compact discovery adds a gateway search round trip. A full schema catalog does not necessarily enter the model's prompt: clients may defer schemas until needed. Neither endpoint guarantees faster execution or lower context use. See [Client Configuration](docs/client-configuration.md) for client recommendations and [Tool Discovery](docs/tool-discovery.md) for limits.
 
-**Migration:** Existing direct-call clients must move from `/mcp` to `/mcp/full`. Existing compact clients must move from `/mcp/discovery` to `/mcp`. The old compact URL is removed, with no alias. Reconnect clients after changing their URL.
-
 <img src="docs/mcp-gateway-architecture.svg" alt="MCP Gateway Architecture" width="75%">
 
 <img src="docs/mcp-gateway-runtime-flow.svg" alt="MCP Gateway Runtime Flow" width="75%">

@@ -47,7 +47,7 @@ Operational guidance:
 - `circuit_breaker_fail_threshold` default `20`
 - `circuit_breaker_open_seconds` default `30`
 
-Both `/mcp` (compact search and call wrappers) and `/mcp/full` (full permitted catalog) are always available. Clients choose through their connection URL. Existing direct-call clients must move to `/mcp/full`; the old `/mcp/discovery` URL is removed, with compact clients moving to `/mcp`. See [Tool Discovery](tool-discovery.md).
+Both `/mcp` (compact search and call wrappers) and `/mcp/full` (full permitted catalog) are always available. Clients choose through their connection URL. See [Tool Discovery](tool-discovery.md).
 
 Deployment notes:
 

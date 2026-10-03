@@ -15,12 +15,6 @@ Native tool search depends on the client's version, model, and settings. See [Cl
 
 A full schema catalog is not a measurement of model prompt context: clients may defer schemas. Compact discovery adds a gateway search request and does not guarantee faster execution or lower context use. See [Tool Discovery](tool-discovery.md) for limits and tradeoffs.
 
-## Migrate Existing Clients
-
-- Direct-call clients using `/mcp` must change their URL to `/mcp/full`.
-- Compact clients using `/mcp/discovery` must change their URL to `/mcp`.
-- `/mcp/discovery` is removed, with no alias. Reconnect the client after changing the URL.
-
 ## Codex
 
 ```toml
