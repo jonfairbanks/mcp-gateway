@@ -203,7 +203,7 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging(i
                         assert ready_payload["ready"] is True
 
                         initialize_response = await client.post(
-                            "/mcp",
+                            "/mcp/full",
                             headers=headers,
                             json={
                                 "jsonrpc": "2.0",
@@ -222,7 +222,7 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging(i
                         assert initialize_response.headers["MCP-Protocol-Version"] == CURRENT_PROTOCOL_VERSION
 
                         initialized_response = await client.post(
-                            "/mcp",
+                            "/mcp/full",
                             headers=headers,
                             json={
                                 "jsonrpc": "2.0",
@@ -233,7 +233,7 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging(i
                         assert initialized_response.status == 202
 
                         list_response = await client.post(
-                            "/mcp",
+                            "/mcp/full",
                             headers=headers,
                             json={"jsonrpc": "2.0", "id": "list-1", "method": "tools/list", "params": {}},
                         )
@@ -243,7 +243,7 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging(i
                         assert tool_names == ["http.echo", "stdio.echo"]
 
                         http_call_response = await client.post(
-                            "/mcp",
+                            "/mcp/full",
                             headers=headers,
                             json={
                                 "jsonrpc": "2.0",
@@ -257,7 +257,7 @@ def test_gateway_app_integrates_http_and_stdio_upstreams_with_postgres_logging(i
                         assert http_call_payload["result"]["content"][0]["text"] == "http.echo:from-http"
 
                         stdio_call_response = await client.post(
-                            "/mcp",
+                            "/mcp/full",
                             headers=headers,
                             json={
                                 "jsonrpc": "2.0",
@@ -473,9 +473,13 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances(isolat
                                     "method": "tools/call",
                                     "params": {"name": "http.echo", "arguments": {"value": "shared-cache"}},
                                 }
-                                first = await client_a.post("/mcp", headers=headers, json=payload)
-                                second = await client_b.post("/mcp", headers=headers, json={**payload, "id": "call-2"})
-                                third = await client_a.post("/mcp", headers=headers, json={**payload, "id": 0})
+                                first = await client_a.post("/mcp/full", headers=headers, json=payload)
+                                second = await client_b.post("/mcp/full", headers=headers, json={**payload, "id": "call-2"})
+                                third = await client_a.post("/mcp", headers=headers, json={
+                                    **payload, "id": 0, "params": {
+                                        "name": "gateway_call_tool", "arguments": payload["params"],
+                                    },
+                                })
 
                                 assert first.status == 200
                                 assert second.status == 200
@@ -495,14 +499,14 @@ def test_shared_cache_and_postgres_auth_work_across_two_gateway_instances(isolat
 
                                 second_key = await auth.issue_api_key(key_name="desktop")
                                 other_headers = {"Authorization": f"Bearer {second_key['api_key']}"}
-                                isolated = await client_b.post("/mcp", headers=other_headers, json=payload)
+                                isolated = await client_b.post("/mcp/full", headers=other_headers, json=payload)
                                 assert isolated.status == 200
                                 assert "result" in await isolated.json()
                                 assert tool_call_count == 2
 
                                 await auth.revoke_api_key(issued["api_key_id"])
                                 for client in (client_a, client_b):
-                                    denied = await client.post("/mcp", headers=headers, json=payload)
+                                    denied = await client.post("/mcp/full", headers=headers, json=payload)
                                     assert denied.status == 401
                                 assert tool_call_count == 2
             finally:

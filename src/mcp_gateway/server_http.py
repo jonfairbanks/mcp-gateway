@@ -10,7 +10,7 @@ from aiohttp import web
 
 from .auth import AuthUnavailableError
 from .config import AppConfig
-from .discovery import DISCOVERY_PATH
+from .discovery import DISCOVERY_PATH, FULL_PATH
 from .gateway import Gateway
 from .jsonrpc import make_error_response
 from .logging import Logger
@@ -19,7 +19,7 @@ from .request_context import AuthenticatedPrincipal, RequestContext
 from .telemetry import GatewayTelemetry
 
 MAX_JSONRPC_BATCH_SIZE = 100
-MCP_PATHS = frozenset({"/mcp", DISCOVERY_PATH})
+MCP_PATHS = frozenset({DISCOVERY_PATH, FULL_PATH})
 
 
 class HttpServer:
@@ -517,20 +517,13 @@ class HttpServer:
             web.get("/metrics", self.metrics_handler),
             web.get("/v1/me", self.me_handler),
         ]
-        routes.extend(
-            [
-                web.get("/mcp", self.mcp_get_handler),
-                web.post("/mcp", self.mcp_post_handler),
-                web.delete("/mcp", self.mcp_delete_handler),
-                web.options("/mcp", self.mcp_options_handler),
-            ]
-        )
-        routes.extend([
-            web.get(DISCOVERY_PATH, self.mcp_get_handler),
-            web.post(DISCOVERY_PATH, self.mcp_post_handler),
-            web.delete(DISCOVERY_PATH, self.mcp_delete_handler),
-            web.options(DISCOVERY_PATH, self.mcp_options_handler),
-        ])
+        for path in (DISCOVERY_PATH, FULL_PATH):
+            routes.extend([
+                web.get(path, self.mcp_get_handler),
+                web.post(path, self.mcp_post_handler),
+                web.delete(path, self.mcp_delete_handler),
+                web.options(path, self.mcp_options_handler),
+            ])
         app.add_routes(routes)
         return app
 
