@@ -10,7 +10,20 @@ It is intended for operators and platform engineers who need to:
 - share cache and audit state across replicas
 - observe tool usage and upstream health
 
-The gateway speaks MCP over `POST /mcp` and currently supports MCP protocol versions `2025-03-26` and `2025-11-25`, defaulting to `2025-11-25`.
+The gateway speaks MCP over `POST /mcp` and the optional `POST /mcp/discovery` endpoint. It supports MCP protocol versions `2025-03-26` and `2025-11-25`, defaulting to `2025-11-25`.
+
+## Choose an Endpoint
+
+Use `/mcp/discovery` for a smaller initial tool catalog, including in Codex. It advertises two wrappers that search for tool schemas and call the selected tool. Enable it in the gateway config, then restart the gateway:
+
+```yaml
+gateway:
+  tool_discovery_enabled: true
+```
+
+Point the client's MCP URL at `/mcp/discovery` with the same bearer token. The endpoint is disabled by default and returns 404 until enabled. Each search adds a request; compact discovery does not guarantee faster tool execution.
+
+Use `/mcp` for the full permitted catalog, native client tool discovery, or clients that need individual tools advertised directly. See [Client Configuration](docs/client-configuration.md) for examples and [Tool Discovery](docs/tool-discovery.md) for limits and fallback behavior.
 
 <img src="docs/mcp-gateway-architecture.svg" alt="MCP Gateway Architecture" width="75%">
 
@@ -20,7 +33,7 @@ The gateway speaks MCP over `POST /mcp` and currently supports MCP protocol vers
 
 For MCP clients:
 
-- presents one MCP endpoint at `POST /mcp`
+- offers the full catalog at `POST /mcp` and optional compact discovery at `POST /mcp/discovery`
 - fans out discovery requests such as `initialize`, `tools/list`, `resources/list`, and `prompts/list`
 - routes `tools/call` to one upstream based on tool ownership
 

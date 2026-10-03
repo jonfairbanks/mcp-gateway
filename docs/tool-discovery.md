@@ -1,13 +1,13 @@
 # Tool Discovery
 
-Keep Codex on `/mcp` and use its native deferred tool loading. For clients that load every tool schema into the model context, enable the optional compact endpoint:
+Use `/mcp/discovery` when you want a smaller initial tool catalog, including in Codex. Enable the optional compact endpoint and restart the gateway:
 
 ```yaml
 gateway:
   tool_discovery_enabled: true
 ```
 
-Point that client's MCP connection at `/mcp/discovery` with the same bearer token. `/mcp` continues to advertise the full permitted catalog. The compact endpoint advertises two tools:
+Point the client's MCP connection at `/mcp/discovery` with the same bearer token, then reconnect the client to refresh its tools. `/mcp` remains available for the full permitted catalog and native client tool discovery. The compact endpoint advertises two tools:
 
 - `gateway_search_tools`: Search locally with `query`, optional `limit` (1–10, default 5), and optional `upstream` integration ID. Results include tool names, input schemas, and annotations.
 - `gateway_call_tool`: Pass the selected `name` and an `arguments` object matching its input schema.
