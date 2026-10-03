@@ -16,8 +16,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Prepare Release Metadata
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/prepare-release.yml
+    secrets: inherit
+
   promote:
     name: Promote Develop to Main
+    needs: prepare
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -27,7 +34,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          DEVELOP_SHA: ${{ needs.prepare.outputs.develop_sha }}
         run: |
+          if [ -z "$DEVELOP_SHA" ] || [ "$(gh api "repos/$GH_REPO/git/ref/heads/develop" --jq '.object.sha')" != "$DEVELOP_SHA" ]; then
+            echo "Develop advanced after release preparation; rerun promotion." >&2
+            exit 1
+          fi
           ahead_by="$(gh api "repos/$GH_REPO/compare/main...develop" --jq '.ahead_by')"
           if [ "$ahead_by" -gt 0 ]; then
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
@@ -43,9 +55,14 @@ jobs:
           # Unlike GITHUB_TOKEN, this token lets PR creation and merging trigger CI.
           GH_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          DEVELOP_SHA: ${{ needs.prepare.outputs.develop_sha }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
             echo "Configure PERSONAL_TOKEN with repository Contents and Pull requests write access." >&2
+            exit 1
+          fi
+          if [ "$(gh api "repos/$GH_REPO/git/ref/heads/develop" --jq '.object.sha')" != "$DEVELOP_SHA" ]; then
+            echo "Develop advanced before promotion PR creation; rerun preparation." >&2
             exit 1
           fi
           pr_url="$(gh pr list --base main --head develop --state open --json url --jq '.[0].url')"
@@ -55,7 +72,12 @@ jobs:
               --body 'Automated weekly release from develop to main. Required checks and branch rules gate merging.')"
           fi
           echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$(gh pr view "$pr_url" --json headRefOid --jq '.headRefOid')" >> "$GITHUB_OUTPUT"
+          head_sha="$(gh pr view "$pr_url" --json headRefOid --jq '.headRefOid')"
+          if [ "$head_sha" != "$DEVELOP_SHA" ]; then
+            echo "Promotion PR does not match prepared develop; rerun preparation." >&2
+            exit 1
+          fi
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
           echo "Release PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Wait for Required Checks and Merge

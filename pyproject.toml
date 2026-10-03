@@ -51,10 +51,18 @@ ignore = ["E501"]
 pythonpath = ["src"]
 
 [tool.semantic_release]
-branch = "main"
 tag_format = "v{version}"
 commit_message = "chore(release): {version}"
-changelog_file = "CHANGELOG.md"
-upload_to_pypi = false
 version_toml = ["pyproject.toml:project.version"]
 version_variables = ["src/mcp_gateway/__init__.py:__version__"]
+
+[tool.semantic_release.branches.main]
+match = "^(main|develop)$"
+prerelease = false
+
+[tool.semantic_release.changelog]
+exclude_commit_patterns = ['^chore\(release\):']
+
+[tool.semantic_release.changelog.default_templates]
+changelog_file = "CHANGELOG.md"
+mask_initial_release = false
