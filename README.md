@@ -137,14 +137,13 @@ The checked-in example config is intentionally runnable and enables `context7` b
 
 ## Automated Releases
 
-This repository includes a GitHub Actions workflow at `.github/workflows/release.yml` that runs on pushes to `main` and on manual dispatch.
+Weekly promotion runs Mondays at 2:15 PM Pacific. It first prepares version and changelog updates in a PR to `develop`, waits for required checks, and merges through branch protection. It then promotes the verified develop commit to `main` through another protected PR.
 
-The workflow uses `python-semantic-release` to:
+On `main`, `.github/workflows/release.yml` verifies the committed versions and changelog, then creates a tag and GitHub release at that exact commit. It never pushes a source commit to `main`. Image publication runs separately.
 
-- determine version bumps from Conventional Commit messages
-- update `pyproject.toml` and `src/mcp_gateway/__init__.py`
-- create a Git tag and GitHub Release
-- maintain `CHANGELOG.md`
+Preparation and promotion require the `PERSONAL_TOKEN` Actions secret with repository Contents and Pull requests write access so their PRs trigger CI. Release publication uses `GITHUB_TOKEN`. Both preparation and weekly promotion can also be dispatched manually from `main`.
+
+Python Semantic Release calculates versions from Conventional Commits and published tags. With no previous tags, the first release is `1.0.0`. Subsequent releases follow semantic versioning. Tag conflicts and unprepared versions fail the release; reruns can finish a release if its tag was created before publication failed.
 
 Examples of release-driving commits:
 

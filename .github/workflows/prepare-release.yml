@@ -1,0 +1,182 @@
+name: Prepare Release
+
+on:
+  workflow_call:
+    outputs:
+      develop_sha:
+        description: Develop commit verified after release preparation
+        value: ${{ jobs.prepare.outputs.develop_sha }}
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: prepare-release-development
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare Release PR
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      develop_sha: ${{ steps.verify.outputs.develop_sha }}
+    steps:
+      - name: Check Out Develop
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: develop
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set Up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Prepare Version and Changelog
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -m pip install python-semantic-release==10.6.2
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          python scripts/release.py prepare
+
+      - name: Create or Find Preparation PR
+        if: steps.version.outputs.changed == 'true'
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "Configure PERSONAL_TOKEN with Contents and Pull requests write access." >&2
+            exit 1
+          fi
+          if [ "$(gh api "repos/$GH_REPO/git/ref/heads/develop" --jq '.object.sha')" != "$SOURCE_SHA" ]; then
+            echo "Develop advanced during preparation; rerun for the new head." >&2
+            exit 1
+          fi
+          branch="fix/prepare-release-$VERSION-${SOURCE_SHA:0:12}"
+          git checkout -b "$branch"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- pyproject.toml src/mcp_gateway/__init__.py CHANGELOG.md
+          expected_tree="$(git write-tree)"
+          gh auth setup-git
+          remote_sha="$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)"
+          if [ -n "$remote_sha" ]; then
+            git fetch origin "refs/heads/$branch"
+            if [ "$(git rev-parse FETCH_HEAD^{tree})" != "$expected_tree" ] || \
+               [ "$(git rev-parse FETCH_HEAD^)" != "$SOURCE_SHA" ] || \
+               [ "$(git rev-list --parents -n 1 FETCH_HEAD | wc -w | tr -d ' ')" != 2 ]; then
+              echo "Existing preparation branch differs from the expected release; refusing to overwrite it." >&2
+              exit 1
+            fi
+            head_sha="$remote_sha"
+          else
+            git commit -m "chore(release): $VERSION"
+            head_sha="$(git rev-parse HEAD)"
+            if [ "$(gh api "repos/$GH_REPO/git/ref/heads/develop" --jq '.object.sha')" != "$SOURCE_SHA" ]; then
+              echo "Develop advanced before branch publication; rerun preparation." >&2
+              exit 1
+            fi
+            git push origin "HEAD:refs/heads/$branch"
+          fi
+          pr_url="$(gh pr list --base develop --head "$branch" --state open --json url --jq '.[0].url')"
+          if [ -z "$pr_url" ]; then
+            cat > "$RUNNER_TEMP/release-preparation.md" <<EOF
+          ## Summary
+
+          - Prepare Version $VERSION and its changelog for promotion through develop.
+          - Keep release metadata subject to required checks and branch rules.
+          EOF
+            pr_url="$(gh pr create --base develop --head "$branch" \
+              --title "chore(release): prepare $VERSION" \
+              --body-file "$RUNNER_TEMP/release-preparation.md")"
+          fi
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "Preparation PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for Required Checks and Merge
+        if: steps.version.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
+        run: |
+          required="$(gh api "repos/$GH_REPO/branches/develop/rules" --jq \
+            '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context] | unique')"
+          if [ "$(jq 'length' <<< "$required")" -eq 0 ]; then
+            echo "No required develop checks found; refusing to merge." >&2
+            exit 1
+          fi
+          ready=false
+          for attempt in {1..90}; do
+            if [ "$(gh pr view "$PR_URL" --json headRefOid --jq '.headRefOid')" != "$HEAD_SHA" ] || \
+               [ "$(gh api "repos/$GH_REPO/git/ref/heads/develop" --jq '.object.sha')" != "$SOURCE_SHA" ]; then
+              echo "Preparation PR or develop advanced during verification; rerun preparation." >&2
+              exit 1
+            fi
+            checks="$(gh pr checks "$PR_URL" --required --json name,state)" || checks='[]'
+            if jq -e --argjson required "$required" \
+              '. as $checks | all($required[]; . as $name | any($checks[]; .name == $name and .state == "SUCCESS"))' \
+              <<< "$checks" >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 20
+          done
+          if [ "$ready" != true ]; then
+            echo "Timed out waiting for required develop checks." >&2
+            exit 1
+          fi
+          gh pr merge "$PR_URL" --auto --merge --match-head-commit "$HEAD_SHA"
+          for attempt in {1..30}; do
+            if [ "$(gh pr view "$PR_URL" --json state --jq '.state')" = MERGED ]; then
+              exit 0
+            fi
+            if [ "$(gh api "repos/$GH_REPO/git/ref/heads/develop" --jq '.object.sha')" != "$SOURCE_SHA" ]; then
+              gh pr merge "$PR_URL" --disable-auto
+              echo "Develop advanced before preparation merged; rerun preparation." >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          gh pr merge "$PR_URL" --disable-auto
+          echo "Protected preparation auto-merge did not complete." >&2
+          exit 1
+
+      - name: Verify Prepared Develop
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CHANGED: ${{ steps.version.outputs.changed }}
+          SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+        run: |
+          expected_sha="$SOURCE_SHA"
+          if [ "$CHANGED" = true ]; then
+            expected_sha="$(gh pr view "$PR_URL" --json mergeCommit --jq '.mergeCommit.oid')"
+            merge_parent="$(gh api "repos/$GH_REPO/git/commits/$expected_sha" --jq '.parents[0].sha')"
+            if [ "$merge_parent" != "$SOURCE_SHA" ]; then
+              echo "Develop advanced before preparation merged; rerun preparation." >&2
+              exit 1
+            fi
+          fi
+          current_sha="$(gh api "repos/$GH_REPO/git/ref/heads/develop" --jq '.object.sha')"
+          if [ "$current_sha" != "$expected_sha" ]; then
+            echo "Develop advanced after preparation; rerun before promotion." >&2
+            exit 1
+          fi
+          echo "develop_sha=$expected_sha" >> "$GITHUB_OUTPUT"
