@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import os
 import time
 from collections.abc import Iterator
@@ -15,6 +16,8 @@ import aiohttp
 from opentelemetry.propagate import inject
 
 from .protocol import CURRENT_PROTOCOL_VERSION, is_supported_protocol_version
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -275,9 +278,13 @@ class StdioUpstream:
         self._lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
         self._stderr_task: Optional[asyncio.Task[None]] = None
+        self._stderr_callback_failure_reported = False
+        self._close_task: Optional[asyncio.Task[None]] = None
 
     async def start(self) -> None:
         async with self._start_lock:
+            if self._close_task is not None:
+                await self.close()
             if self._process and self._process.returncode is None:
                 return
             if self._process and self._process.returncode is not None:
@@ -298,44 +305,76 @@ class StdioUpstream:
                 cwd=self._cwd,
                 limit=self._read_limit_bytes,
             )
+            self._stderr_callback_failure_reported = False
             self._stderr_task = asyncio.create_task(self._stream_stderr())
 
     async def _discard_dead_process(self) -> None:
-        if self._stderr_task:
-            self._stderr_task.cancel()
-            try:
-                await self._stderr_task
-            except asyncio.CancelledError:
-                pass
-            self._stderr_task = None
-        self._process = None
+        await self.close()
+
+    @staticmethod
+    async def _drain_pipe(stream: asyncio.StreamReader) -> None:
+        while await stream.read(64 * 1024):
+            pass
 
     async def close(self) -> None:
         self._initialize_complete = False
         self._initialized = False
-        if not self._process:
-            return
-        if self._process.returncode is None:
-            try:
-                self._process.terminate()
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(self._process.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
+        if self._close_task is None:
+            if self._process is None and self._stderr_task is None:
+                return
+            self._close_task = asyncio.create_task(self._close_process())
+        task = self._close_task
+        cancelled = False
+        try:
+            while True:
                 try:
-                    self._process.kill()
+                    await asyncio.shield(task)
+                    break
+                except asyncio.CancelledError:
+                    # Keep the process reachable and finish reaping it even if
+                    # this caller is cancelled again or another caller closes.
+                    if task.cancelled():
+                        raise
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError()
+        finally:
+            if task.done() and self._close_task is task:
+                self._close_task = None
+
+    async def _close_process(self) -> None:
+        process, stderr_task = self._process, self._stderr_task
+        drains: list[asyncio.Task[None]] = []
+        try:
+            if stderr_task:
+                stderr_task.cancel()
+                # Logging and reader failures must not prevent process cleanup.
+                outcomes = await asyncio.gather(stderr_task, return_exceptions=True)
+                if isinstance(outcomes[0], Exception):
+                    self._report_stderr_failure("reader")
+            if not process:
+                return
+            drains = [asyncio.create_task(self._drain_pipe(stream))
+                      for stream in (process.stdout, process.stderr) if stream is not None]
+            if process.returncode is None:
+                try:
+                    process.terminate()
                 except ProcessLookupError:
                     pass
-                await self._process.wait()
-        if self._stderr_task:
-            self._stderr_task.cancel()
             try:
-                await self._stderr_task
-            except asyncio.CancelledError:
-                pass
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+        finally:
+            for task in drains:
+                task.cancel()
+            await asyncio.gather(*drains, return_exceptions=True)
+            self._process = None
             self._stderr_task = None
-        self._process = None
 
     async def call(self, payload: Dict[str, Any]) -> UpstreamResponse:
         async with self._lock:
@@ -407,27 +446,63 @@ class StdioUpstream:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise asyncio.TimeoutError()
-            async with asyncio.timeout(remaining):
-                line = await self._process.stdout.readline()
+            try:
+                async with asyncio.timeout(remaining):
+                    line = await self._process.stdout.readline()
+            except ValueError:
+                raise RuntimeError("Upstream stdio response exceeds read limit; request outcome unknown") from None
             if not line:
                 raise RuntimeError("Upstream stdio closed; request outcome unknown")
-            data = json.loads(line.decode("utf-8"))
+            try:
+                data = json.loads(line.decode("utf-8"))
+            except (ValueError, RecursionError):
+                raise RuntimeError("Upstream stdio returned invalid JSON; request outcome unknown") from None
+            if not isinstance(data, dict):
+                raise RuntimeError("Upstream stdio returned a non-object response; request outcome unknown")
             if data.get("id") != expected_id:
                 continue
             return UpstreamResponse(payload=data, success="error" not in data)
 
+    def _report_stderr_failure(self, source: str) -> None:
+        try:
+            _LOGGER.warning("Stdio upstream stderr %s failed for %s", source, self._upstream_id)
+        except Exception:  # noqa: BLE001
+            # Even a broken fallback logging handler must not interrupt cleanup.
+            pass
+
+    def _emit_stderr_line(self, line: bytearray, truncated: bool) -> None:
+        if not self._on_stderr_line:
+            return
+        text = line.decode("utf-8", errors="replace").rstrip()
+        if truncated:
+            text += " [truncated]"
+        if text:
+            try:
+                self._on_stderr_line(self._upstream_id, text)
+            except Exception:  # noqa: BLE001
+                # Report once per session while continuing to drain the pipe.
+                if not self._stderr_callback_failure_reported:
+                    self._stderr_callback_failure_reported = True
+                    self._report_stderr_failure("callback")
+
     async def _stream_stderr(self) -> None:
         if not self._process or not self._process.stderr:
             return
+        stream = self._process.stderr
+        line = bytearray()
+        truncated = False
         try:
-            while True:
-                line = await self._process.stderr.readline()
-                if not line:
-                    return
-                if not self._on_stderr_line:
-                    continue
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    self._on_stderr_line(self._upstream_id, text)
+            while chunk := await stream.read(64 * 1024):
+                # Keep only a bounded prefix of each line, but consume every byte
+                # so an oversized log line cannot block the child process.
+                for index, part in enumerate(chunk.split(b"\n")):
+                    if index:
+                        self._emit_stderr_line(line, truncated)
+                        line.clear()
+                        truncated = False
+                    available = 64 * 1024 - len(line)
+                    truncated = truncated or len(part) > available
+                    line.extend(part[:available])
+            self._emit_stderr_line(line, truncated)
         except asyncio.CancelledError:
             return

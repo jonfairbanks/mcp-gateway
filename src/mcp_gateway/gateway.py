@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from uuid import UUID, uuid4
@@ -147,10 +148,19 @@ class Gateway:
         self._runtime.global_breaker = value
 
     async def close(self) -> None:
-        for client in self._http_upstreams.values():
-            await client.close()
-        for client in self._stdio_upstreams.values():
-            await client.close()
+        async def close_client(upstream_id: str, client: StreamableHTTPUpstream | StdioUpstream) -> None:
+            try:
+                await client.close()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.error(
+                    "upstream_close_failed", upstream_id=upstream_id, error_type=type(exc).__name__, error=str(exc)
+                )
+                raise
+
+        async with AsyncExitStack() as stack:
+            clients = (*self._http_upstreams.items(), *self._stdio_upstreams.items())
+            for upstream_id, client in reversed(clients):
+                stack.push_async_callback(close_client, upstream_id, client)
 
     def store_available(self) -> bool:
         return self._store.is_available()
@@ -231,11 +241,13 @@ class Gateway:
 
         for upstream, tools in tool_payloads:
             upstream_tool_names: list[str] = []
+            upstream_seen: set[str] = set()
             for tool in tools:
                 name = tool.get("name")
                 if not isinstance(name, str) or not name:
                     continue
-                if name not in upstream_tool_names:
+                if name not in upstream_seen:
+                    upstream_seen.add(name)
                     upstream_tool_names.append(name)
                 tool_sources.setdefault(name, set()).add(upstream.id)
                 # Keep denied tools in the registry so tools/call can be routed and

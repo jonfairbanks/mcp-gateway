@@ -87,6 +87,30 @@ for raw_line in sys.stdin:
         params = request.get("params") or {}
         arguments = params.get("arguments") or {}
         time.sleep(float(arguments.get("delay_seconds", 0)))
+        if arguments.get("stdout_noise"):
+            _write({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+            _write({"jsonrpc": "2.0", "id": "another-request", "result": {}})
+        stderr_bytes = arguments.get("stderr_bytes", 0)
+        if stderr_bytes:
+            sys.stderr.write("x" * stderr_bytes + "\nafter oversized line\n")
+            sys.stderr.flush()
+        malformed = arguments.get("malformed_response")
+        if malformed:
+            invalid = {
+                "utf8": b"\xff\n",
+                "json": b"{invalid\n",
+                "array": b"[]\n",
+                "null": b"null\n",
+                "string": b'"text"\n',
+                "number": b"42\n",
+                "oversized": b"x" * (1024 * 1024) + b"\n",
+                "unterminated": b"x" * (1024 * 1024),
+                "huge_integer": b'{"id":' + b"9" * 5000 + b"}\n",
+                "deep_nesting": b"[" * 2000 + b"0" + b"]" * 2000 + b"\n",
+            }
+            sys.stdout.buffer.write(invalid[malformed])
+            sys.stdout.buffer.flush()
+            continue
         _write(
             {
                 "jsonrpc": "2.0",

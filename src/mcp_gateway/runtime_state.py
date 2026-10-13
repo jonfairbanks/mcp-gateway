@@ -12,8 +12,6 @@ class GatewayRuntimeState:
     def __init__(self, config: AppConfig, upstream_by_id: Dict[str, UpstreamConfig]) -> None:
         self._config = config
         self._upstream_by_id = upstream_by_id
-        self._health_counters: Dict[str, Dict[str, Dict[str, int]]] = {}
-        self._health_lock = asyncio.Lock()
         self._breaker_lock = asyncio.Lock()
         self._upstream_breakers: Dict[str, Dict[str, float]] = {}
         self._global_breaker: Dict[str, float] = {"consecutive_failures": 0, "open_until": 0.0}
@@ -69,10 +67,6 @@ class GatewayRuntimeState:
                     self._global_breaker["open_until"] = (
                         time.monotonic() + max(1, self._config.gateway.circuit_breaker_open_seconds)
                     )
-        async with self._health_lock:
-            upstream_entry = self._health_counters.setdefault(upstream_id, {})
-            method_entry = upstream_entry.setdefault(method, {"success": 0, "fail": 0})
-            method_entry["success" if success else "fail"] += 1
 
     def status_snapshot(self) -> Dict[str, Any]:
         now = time.monotonic()
