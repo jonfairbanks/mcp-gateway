@@ -47,6 +47,7 @@ jobs:
           python scripts/release.py prepare
 
       - name: Create or Find Preparation PR
+        shell: bash
         if: steps.version.outputs.changed == 'true'
         id: pr
         env:
@@ -89,7 +90,9 @@ jobs:
             fi
             git push origin "HEAD:refs/heads/$branch"
           fi
-          pr_url="$(gh pr list --base develop --head "$branch" --state open --json url --jq '.[0].url')"
+          pr_url="$(gh api --method GET --paginate "repos/$GH_REPO/pulls" \
+            -f state=open -f base=develop -f "head=${GH_REPO%%/*}:$branch" -f per_page=100 | \
+            jq -rs '[.[][] | select(.head.repo.full_name == env.GH_REPO)] | .[0].html_url // empty')"
           if [ -z "$pr_url" ]; then
             cat > "$RUNNER_TEMP/release-preparation.md" <<EOF
           ## Summary
