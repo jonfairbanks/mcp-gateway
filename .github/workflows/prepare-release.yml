@@ -47,6 +47,7 @@ jobs:
           python scripts/release.py prepare
 
       - name: Create or Find Preparation PR
+        shell: bash
         if: steps.version.outputs.changed == 'true'
         id: pr
         env:

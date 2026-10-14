@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 WORKFLOWS = Path(__file__).resolve().parents[1] / '.github' / 'workflows'
 REPOSITORY = 'jonfairbanks/mcp-gateway'
@@ -47,3 +48,21 @@ def test_release_workflow_selects_only_trusted_repository(filename, base, head, 
         check=True,
     )
     assert result.stdout.strip() == expected
+
+
+@pytest.mark.parametrize('filename', ['prepare-release.yml', 'weekly-develop-to-main.yml'])
+def test_release_pr_query_fails_when_api_returns_partial_results(filename):
+    workflow = yaml.safe_load((WORKFLOWS / filename).read_text())
+    step = next(step for job in workflow['jobs'].values() for step in job.get('steps', [])
+                if 'pr_url="$(gh api' in step.get('run', ''))
+    assert step['shell'] == 'bash'
+    assignment = re.search(r'pr_url="\$\(gh api .*?\)"', step['run'], re.DOTALL)
+    assert assignment is not None
+    script = 'gh() { printf "%s\\n" "$PR_PAGE"; return 1; };\n' + assignment[0]
+    result = subprocess.run(
+        ['bash', '-e', '-o', 'pipefail', '-c', script],
+        env={**os.environ, 'GH_REPO': REPOSITORY, 'branch': 'preparation', 'PR_PAGE': json.dumps([TRUSTED])},
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0
