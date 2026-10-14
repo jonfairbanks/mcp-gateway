@@ -47,6 +47,7 @@ class GatewayConfig:
     required_ready_upstreams: List[str] = field(default_factory=list)
     readiness_min_healthy_upstreams: Optional[int] = None
     readiness_min_healthy_percent: Optional[int] = None
+    global_circuit_breaker_enabled: bool = False
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
@@ -70,6 +71,9 @@ class GatewayConfig:
             rate_limit_per_minute=int(_get(data, "rate_limit_per_minute", 120)),
             circuit_breaker_fail_threshold=int(_get(data, "circuit_breaker_fail_threshold", 20)),
             circuit_breaker_open_seconds=int(_get(data, "circuit_breaker_open_seconds", 30)),
+            global_circuit_breaker_enabled=_boolean(
+                _get(data, "global_circuit_breaker_enabled", False), "gateway.global_circuit_breaker_enabled"
+            ),
             allowed_origins=_allowed_origins(_get(data, "allowed_origins", [])),
             public_metrics=_boolean(_get(data, "public_metrics", False), "public_metrics"),
             tracing_enabled=_boolean(_get(data, "tracing_enabled", False), "tracing_enabled"),

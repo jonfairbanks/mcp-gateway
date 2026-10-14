@@ -44,8 +44,11 @@ Operational guidance:
   - `X-Forwarded-For` and `X-Client-Id` headers are only trusted when `request.remote` is in this list.
 - `request_max_bytes` default `2097152` (2 MB)
 - `rate_limit_per_minute` default `120`
+- `global_circuit_breaker_enabled` default `false`; set to `true` to let consecutive failures across upstreams open a shared breaker that blocks all upstream traffic
 - `circuit_breaker_fail_threshold` default `20`
 - `circuit_breaker_open_seconds` default `30`
+
+Circuit breakers isolate failures to the affected upstream by default. The gateway threshold and cooldown remain the defaults for each upstream's breaker, with optional upstream overrides. They also control the shared breaker when `global_circuit_breaker_enabled` is `true`. Existing threshold and cooldown settings remain supported; deployments that need the previous shared-breaker behavior must explicitly enable it. A successful upstream response resets the shared failure count when enabled.
 
 Both `/mcp` (compact search and call wrappers) and `/mcp/full` (full permitted catalog) are always available. Clients choose through their connection URL. See [Tool Discovery](tool-discovery.md).
 

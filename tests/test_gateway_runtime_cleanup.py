@@ -10,6 +10,7 @@ from mcp_gateway.logging import Logger
 from mcp_gateway.postgres import PostgresStore
 from mcp_gateway.request_context import AuthenticatedPrincipal, RequestContext
 from mcp_gateway.telemetry import GatewayTelemetry
+from mcp_gateway.upstreams import UpstreamResponse
 from tests.gateway_test_support import RecordingLogger, _config_with_upstreams, _upstream
 
 
@@ -17,11 +18,49 @@ def _gateway(upstreams) -> Gateway:
     return Gateway(_config_with_upstreams(upstreams), PostgresStore(""), Logger(stdout_json=False), GatewayTelemetry())
 
 
+@pytest.mark.parametrize("global_enabled", [False, True])
+def test_failing_upstream_only_blocks_other_upstreams_when_shared_breaker_enabled(global_enabled) -> None:
+    failing = _upstream("failing")
+    healthy = _upstream("healthy")
+    gateway = _gateway([failing, healthy])
+    gateway._config.gateway.circuit_breaker_fail_threshold = 2
+    gateway._config.gateway.global_circuit_breaker_enabled = global_enabled
+    calls = []
+
+    async def call(payload):
+        calls.append(payload)
+        return UpstreamResponse(payload={"jsonrpc": "2.0", "id": payload["id"], "result": {}}, success=True)
+
+    gateway._http_upstreams[healthy.id] = SimpleNamespace(call=call)
+
+    async def run_test() -> None:
+        await gateway._record_health(failing.id, "tools/call", False)
+        await gateway._record_health(failing.id, "tools/call", False)
+        assert gateway._runtime.is_upstream_breaker_open(failing.id)
+        assert not gateway._runtime.is_upstream_breaker_open(healthy.id)
+        assert gateway._runtime.is_global_breaker_open() is global_enabled
+        assert gateway._runtime.status_snapshot()["global_breaker"]["open"] is global_enabled
+        request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "healthy_tool"}}
+        if global_enabled:
+            with pytest.raises(RuntimeError, match="Global circuit breaker open"):
+                await gateway._call_upstream(healthy, request)
+            assert calls == []
+        else:
+            assert (await gateway._call_upstream(healthy, request)).success
+            assert calls == [request]
+            assert gateway._global_breaker == {"consecutive_failures": 0, "open_until": 0.0}
+        with pytest.raises(RuntimeError, match="circuit breaker open"):
+            await gateway._call_upstream(failing, request)
+
+    asyncio.run(run_test())
+
+
 def test_health_outcomes_preserve_breaker_thresholds_cooldowns_and_telemetry(monkeypatch) -> None:
     upstream = _upstream("one")
     upstream.circuit_breaker_fail_threshold = 2
     upstream.circuit_breaker_open_seconds = 5
     gateway = _gateway([upstream])
+    gateway._config.gateway.global_circuit_breaker_enabled = True
     gateway._config.gateway.circuit_breaker_fail_threshold = 3
     gateway._config.gateway.circuit_breaker_open_seconds = 10
     now = 100.0
