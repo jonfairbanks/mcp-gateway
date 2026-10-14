@@ -49,6 +49,7 @@ jobs:
           fi
 
       - name: Create or Find Release PR
+        shell: bash
         if: steps.changes.outputs.has_changes == 'true'
         id: release
         env:
@@ -65,7 +66,9 @@ jobs:
             echo "Develop advanced before promotion PR creation; rerun preparation." >&2
             exit 1
           fi
-          pr_url="$(gh pr list --base main --head develop --state open --json url --jq '.[0].url')"
+          pr_url="$(gh api --method GET --paginate "repos/$GH_REPO/pulls" \
+            -f state=open -f base=main -f "head=${GH_REPO%%/*}:develop" -f per_page=100 | \
+            jq -rs '[.[][] | select(.head.repo.full_name == env.GH_REPO)] | .[0].html_url // empty')"
           if [ -z "$pr_url" ]; then
             pr_url="$(gh pr create --base main --head develop \
               --title 'chore: release develop to main' \

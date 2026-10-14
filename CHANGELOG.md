@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.0.4 (2026-10-13)
+
+### Bug Fixes
+
+- **ci**: Fail closed on partial PR queries
+  ([`10e2873`](https://github.com/jonfairbanks/mcp-gateway/commit/10e2873bd47b9638a2214b75aae9b7a84605412a))
+
+- **ci**: Select release PRs from the trusted repository
+  ([`0046425`](https://github.com/jonfairbanks/mcp-gateway/commit/004642593624c73503f256d6fc6a287aba6d64ce))
+
+
 ## v1.0.3 (2026-10-13)
 
 ### Bug Fixes
