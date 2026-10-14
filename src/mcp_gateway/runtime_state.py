@@ -47,10 +47,12 @@ class GatewayRuntimeState:
             upstream_state = self._upstream_breakers.setdefault(upstream_id, {"consecutive_failures": 0, "open_until": 0.0})
             if success:
                 upstream_state["consecutive_failures"] = 0
-                self._global_breaker["consecutive_failures"] = 0
+                if self._config.gateway.global_circuit_breaker_enabled:
+                    self._global_breaker["consecutive_failures"] = 0
             else:
                 upstream_state["consecutive_failures"] += 1
-                self._global_breaker["consecutive_failures"] += 1
+                if self._config.gateway.global_circuit_breaker_enabled:
+                    self._global_breaker["consecutive_failures"] += 1
                 upstream_threshold = int(
                     upstream_cfg.circuit_breaker_fail_threshold
                     if upstream_cfg and upstream_cfg.circuit_breaker_fail_threshold is not None
@@ -63,7 +65,9 @@ class GatewayRuntimeState:
                 )
                 if int(upstream_state["consecutive_failures"]) >= max(1, upstream_threshold):
                     upstream_state["open_until"] = time.monotonic() + max(1, upstream_open_seconds)
-                if int(self._global_breaker["consecutive_failures"]) >= max(1, self._config.gateway.circuit_breaker_fail_threshold):
+                if self._config.gateway.global_circuit_breaker_enabled and int(
+                    self._global_breaker["consecutive_failures"]
+                ) >= max(1, self._config.gateway.circuit_breaker_fail_threshold):
                     self._global_breaker["open_until"] = (
                         time.monotonic() + max(1, self._config.gateway.circuit_breaker_open_seconds)
                     )
@@ -81,8 +85,11 @@ class GatewayRuntimeState:
             "warmup": self._warmup_status,
             "global_breaker": {
                 "consecutive_failures": int(self._global_breaker.get("consecutive_failures", 0)),
-                "open": now < float(self._global_breaker.get("open_until", 0.0)),
-                "open_seconds_remaining": max(0, int(float(self._global_breaker.get("open_until", 0.0)) - now)),
+                "open": self.is_global_breaker_open(),
+                "open_seconds_remaining": (
+                    max(0, int(float(self._global_breaker.get("open_until", 0.0)) - now))
+                    if self._config.gateway.global_circuit_breaker_enabled else 0
+                ),
             },
             "upstream_breakers": upstream_breakers,
         }
@@ -153,7 +160,9 @@ class GatewayRuntimeState:
         return bool(healthy_upstream_ids)
 
     def is_global_breaker_open(self) -> bool:
-        return time.monotonic() < float(self._global_breaker.get("open_until", 0.0))
+        return self._config.gateway.global_circuit_breaker_enabled and time.monotonic() < float(
+            self._global_breaker.get("open_until", 0.0)
+        )
 
     def is_upstream_breaker_open(self, upstream_id: str) -> bool:
         state = self._upstream_breakers.get(upstream_id)

@@ -17,3 +17,7 @@ Search is lexical. Retry with specific terms or an exact tool name when results 
 Wrapped calls use the existing authentication, rate limits, deny policy, routing, cache scope, redaction, and audit path. The call wrapper conservatively advertises possible writes; consult each target's annotations before execution. Validation supports local schema references and never fetches external references. Tools requiring external references must use `/mcp/full`.
 
 The index and routing table refresh together during registry warmup or discovery refresh. Warm searches make no upstream requests. Denied tools are excluded. The gateway reserves `gateway_search_tools` and `gateway_call_tool`; collisions fail registry publication. Browser clients require the same explicit `allowed_origins` setting as `/mcp`.
+
+## Direct Tool Routing
+
+Direct tool calls use advertised tool ownership, configured route prefixes, or an explicit upstream namespace. A name that matches none of these returns JSON-RPC `-32602` without contacting an upstream. Methods without tool names retain their default upstream routing.

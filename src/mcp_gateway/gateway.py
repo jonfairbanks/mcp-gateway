@@ -77,12 +77,17 @@ class RoutedRequest:
     discovery_index: Optional[ToolDiscoveryIndex] = None
 
 
+class CircuitBreakerOpenError(RuntimeError):
+    pass
+
+
 @dataclass
 class UpstreamExecution:
     success: bool
     payload: Dict[str, Any]
     log_payload: Dict[str, Any]
     error: Optional[Dict[str, Any]]
+    breaker_rejected: bool = False
 
 
 @dataclass
@@ -421,14 +426,18 @@ class Gateway:
                 error=str(exc),
             )
 
-    async def _record_health(self, upstream_id: str, method: str, success: bool) -> None:
-        await self._runtime.record_health(upstream_id, method, success)
+    async def _record_health(
+        self, upstream_id: str, method: str, success: bool, *, breaker_rejected: bool = False,
+    ) -> None:
+        if not breaker_rejected:
+            await self._runtime.record_health(upstream_id, method, success)
         self._telemetry.record_upstream_outcome(upstream_id, method, success)
 
     def _get_tool_name(self, method: str, params: Optional[Dict[str, Any]]) -> Optional[str]:
         if method != "tools/call" or not params:
             return None
-        return params.get("tool") or params.get("name")
+        name = params.get("tool") or params.get("name")
+        return name if isinstance(name, str) and name else None
 
     def _is_cacheable(self, method: str, tool_name: Optional[str]) -> bool:
         if not self._config.cache.enabled:
@@ -544,7 +553,9 @@ class Gateway:
 
         upstream = self._upstream_by_id.get(registry_upstream_id) if registry_upstream_id else None
         if upstream is None:
-            upstream = select_upstream(self._config.upstreams, self._routes, tool_name)
+            upstream = select_upstream(
+                self._config.upstreams, self._routes, tool_name, allow_fallback=method != "tools/call",
+            )
 
         cache_key: Optional[str] = None
         if upstream and self._is_cacheable(method, tool_name):
@@ -666,9 +677,9 @@ class Gateway:
 
     async def _call_upstream(self, upstream: UpstreamConfig, payload: Dict[str, Any]) -> UpstreamResponse:
         if self._is_global_breaker_open():
-            raise RuntimeError("Global circuit breaker open")
+            raise CircuitBreakerOpenError("Global circuit breaker open")
         if self._is_upstream_breaker_open(upstream.id):
-            raise RuntimeError(f"Upstream circuit breaker open: {upstream.id}")
+            raise CircuitBreakerOpenError(f"Upstream circuit breaker open: {upstream.id}")
         client = await self._get_upstream_client(upstream)
         # `max_in_flight` is enforced per upstream so one slow integration does not
         # starve unrelated upstream traffic.
@@ -678,9 +689,9 @@ class Gateway:
 
     async def _notify_upstream(self, upstream: UpstreamConfig, payload: Dict[str, Any]) -> None:
         if self._is_global_breaker_open():
-            raise RuntimeError("Global circuit breaker open")
+            raise CircuitBreakerOpenError("Global circuit breaker open")
         if self._is_upstream_breaker_open(upstream.id):
-            raise RuntimeError(f"Upstream circuit breaker open: {upstream.id}")
+            raise CircuitBreakerOpenError(f"Upstream circuit breaker open: {upstream.id}")
         client = await self._get_upstream_client(upstream)
         semaphore = self._upstream_semaphores.setdefault(upstream.id, asyncio.Semaphore(max(1, upstream.max_in_flight)))
         async with semaphore:
@@ -717,6 +728,7 @@ class Gateway:
         notification: bool = False,
     ) -> UpstreamExecution:
         with self._telemetry.start_upstream_span(upstream.id, upstream.transport, method, notification=notification):
+            breaker_rejected = False
             try:
                 if notification:
                     await self._notify_upstream(upstream, payload)
@@ -754,6 +766,7 @@ class Gateway:
                     notification=notification,
                 )
             except RuntimeError as exc:
+                breaker_rejected = isinstance(exc, CircuitBreakerOpenError)
                 error = {"code": -32004, "message": "Upstream unavailable"}
                 self._telemetry.annotate_exception(exc)
                 self._log_upstream_exception(
@@ -782,6 +795,7 @@ class Gateway:
                     payload={"accepted": False},
                     log_payload={"accepted": False, "error": error},
                     error=error,
+                    breaker_rejected=breaker_rejected,
                 )
 
             error_payload = make_error_response(payload.get("id"), error["code"], error["message"])
@@ -790,6 +804,7 @@ class Gateway:
                 payload=error_payload,
                 log_payload=error_payload,
                 error=error,
+                breaker_rejected=breaker_rejected,
             )
 
     async def _load_cached_response(self, cache_key: str, request_id: UUID) -> Optional[Dict[str, Any]]:
@@ -878,7 +893,7 @@ class Gateway:
         if extra_log_fields:
             log_fields.update(extra_log_fields)
         if error is not None:
-            log_fields["error"] = error
+            log_fields["error"] = self._redact_for_storage(error)
         self._logger.info(event_name, **log_fields)
         self._telemetry.record_response(
             method=method,
@@ -927,7 +942,7 @@ class Gateway:
                     successful_upstreams += 1
                     results.append({"upstream": upstream, "result": {}})
                     continue
-                await self._record_health(upstream.id, method, False)
+                await self._record_health(upstream.id, method, False, breaker_rejected=execution.breaker_rejected)
                 upstream_errors.append(
                     {
                         "upstream_id": upstream.id,
@@ -943,7 +958,7 @@ class Gateway:
                 successful_upstreams += 1
                 results.append({"upstream": upstream, "result": result})
             else:
-                await self._record_health(upstream.id, method, False)
+                await self._record_health(upstream.id, method, False, breaker_rejected=execution.breaker_rejected)
                 upstream_errors.append(
                     {
                         "upstream_id": upstream.id,
@@ -1060,7 +1075,7 @@ class Gateway:
         for upstream, execution in executions:
             result = execution.payload.get("result")
             success = execution.success and isinstance(result, dict)
-            await self._record_health(upstream.id, "initialize", success)
+            await self._record_health(upstream.id, "initialize", success, breaker_rejected=execution.breaker_rejected)
             if not success:
                 continue
             successful += 1
@@ -1086,7 +1101,7 @@ class Gateway:
         )
         successful = 0
         for upstream, execution in executions:
-            await self._record_health(upstream.id, "notifications/initialized", execution.success)
+            await self._record_health(upstream.id, "notifications/initialized", execution.success, breaker_rejected=execution.breaker_rejected)
             if execution.success:
                 successful += 1
         return successful > 0
@@ -1125,7 +1140,7 @@ class Gateway:
         init_error = None if init_success else init_execution.error
         init_result = init_execution.payload.get("result") if isinstance(init_execution.payload.get("result"), dict) else {}
         init_capabilities = init_result.get("capabilities") if isinstance(init_result.get("capabilities"), dict) else {}
-        await self._record_health(upstream.id, "initialize", init_success)
+        await self._record_health(upstream.id, "initialize", init_success, breaker_rejected=init_execution.breaker_rejected)
 
         if init_success:
             notify_payload = {
@@ -1139,7 +1154,7 @@ class Gateway:
                 notify_payload,
                 notification=True,
             )
-            await self._record_health(upstream.id, "notifications/initialized", notify_execution.success)
+            await self._record_health(upstream.id, "notifications/initialized", notify_execution.success, breaker_rejected=notify_execution.breaker_rejected)
 
         tools_payload = {
             "jsonrpc": "2.0",
@@ -1158,7 +1173,7 @@ class Gateway:
             tool_names = [tool["name"] for tool in tool_payloads if isinstance(tool.get("name"), str)]
             tools_list_success = True
             tools_list_error = None
-        await self._record_health(upstream.id, "tools/list", tools_list_success)
+        await self._record_health(upstream.id, "tools/list", tools_list_success, breaker_rejected=tools_execution.breaker_rejected)
         return WarmupResult(
             upstream=upstream,
             initialize_success=init_success,
@@ -1365,7 +1380,16 @@ class Gateway:
                 params = payload.get("params")
             routed = await self._route_request(payload, method, params, request_context)
             if not routed.upstream:
-                error_payload = make_error_response(payload.get("id"), -32000, "No upstream configured")
+                unknown_tool = method == "tools/call" and bool(self._config.upstreams)
+                if unknown_tool:
+                    await self._log_request_start(
+                        request_id=request_id, method=method, params=params, raw_request=original_payload,
+                        upstream_id=None, tool_name=routed.tool_name, request_context=request_context,
+                        cache_key=None, requested_tool_name=routed.requested_tool_name,
+                    )
+                    error_payload = make_error_response(payload.get("id"), -32602, "Unknown or unavailable tool")
+                else:
+                    error_payload = make_error_response(payload.get("id"), -32000, "No upstream configured")
                 return await self._finalize_request(
                     request_id=request_id,
                     method=method,
@@ -1375,7 +1399,7 @@ class Gateway:
                     latency_ms=0,
                     upstream_id=None,
                     tool_name=routed.tool_name,
-                    log_response=False,
+                    log_response=unknown_tool,
                     error=error_payload.get("error"),
                 )
             await self._log_request_start(
@@ -1485,7 +1509,7 @@ class Gateway:
                     routed.payload,
                     notification=True,
                 )
-                await self._record_health(routed.upstream.id, method, execution.success)
+                await self._record_health(routed.upstream.id, method, execution.success, breaker_rejected=execution.breaker_rejected)
                 return await self._finalize_request(
                     request_id=request_id,
                     method=method,
@@ -1516,7 +1540,7 @@ class Gateway:
 
             timer = Timer()
             execution = await self._execute_upstream_operation(routed.upstream, method, routed.payload)
-            await self._record_health(routed.upstream.id, method, execution.success)
+            await self._record_health(routed.upstream.id, method, execution.success, breaker_rejected=execution.breaker_rejected)
             result = await self._finalize_request(
                 request_id=request_id,
                 method=method,

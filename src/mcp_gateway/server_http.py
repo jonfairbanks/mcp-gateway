@@ -59,7 +59,8 @@ class HttpServer:
             )
             response = web.Response(status=405, headers={"Allow": ", ".join(allowed_methods)}, text="Method Not Allowed")
             return self._with_mcp_cors_headers(request, response)
-        except web.HTTPException:
+        except web.HTTPException as exc:
+            self._with_mcp_cors_headers(request, exc)
             raise
         except Exception as exc:  # noqa: BLE001
             self._logger.error(
