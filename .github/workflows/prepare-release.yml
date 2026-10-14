@@ -114,7 +114,7 @@ jobs:
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
           SOURCE_SHA: ${{ steps.version.outputs.source_sha }}
         run: |
-          required="$(gh api "repos/$GH_REPO/branches/develop/rules" --jq \
+          required="$(gh api "repos/$GH_REPO/rules/branches/develop" --jq \
             '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context] | unique')"
           if [ "$(jq 'length' <<< "$required")" -eq 0 ]; then
             echo "No required develop checks found; refusing to merge." >&2
