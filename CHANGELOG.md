@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.0.1 (2026-10-13)
+
+### Bug Fixes
+
+- **gateway**: Close lifecycle gaps and simplify runtime state
+  ([`f92a394`](https://github.com/jonfairbanks/mcp-gateway/commit/f92a3940ceb10c82a1864161fc68616e8720fe1e))
+
+
 ## v1.0.0 (2026-10-03)
 
 ### Bug Fixes
