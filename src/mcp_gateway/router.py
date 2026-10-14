@@ -17,9 +17,11 @@ def select_upstream(
     upstreams: List[UpstreamConfig],
     routes: Dict[str, UpstreamConfig],
     tool_name: Optional[str],
+    *,
+    allow_fallback: bool = True,
 ) -> Optional[UpstreamConfig]:
     if not tool_name:
-        return upstreams[0] if upstreams else None
+        return upstreams[0] if upstreams and allow_fallback else None
 
     matched_upstream: Optional[UpstreamConfig] = None
     matched_prefix_length = -1
@@ -35,4 +37,4 @@ def select_upstream(
         if upstream.id == namespace or upstream.name == namespace:
             return upstream
 
-    return upstreams[0] if upstreams else None
+    return upstreams[0] if upstreams and allow_fallback else None

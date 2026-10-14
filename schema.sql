@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS mcp_denials (
   reason TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_mcp_responses_request_id ON mcp_responses (request_id);
+CREATE INDEX IF NOT EXISTS idx_mcp_denials_request_id ON mcp_denials (request_id);
+
 CREATE TABLE IF NOT EXISTS mcp_cache (
   cache_key TEXT PRIMARY KEY,
   response JSONB NOT NULL,

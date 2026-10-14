@@ -4,7 +4,25 @@ from pathlib import Path
 
 import pytest
 
-from mcp_gateway.config import load_config
+from mcp_gateway.config import GatewayConfig, load_config
+
+
+@pytest.mark.parametrize("value", [True, "true", "TRUE"])
+def test_shared_circuit_breaker_requires_explicit_opt_in(value) -> None:
+    config = GatewayConfig.from_dict({"global_circuit_breaker_enabled": value})
+    assert config.global_circuit_breaker_enabled is True
+
+
+@pytest.mark.parametrize("value", [False, "false", "FALSE"])
+def test_shared_circuit_breaker_can_be_disabled(value) -> None:
+    config = GatewayConfig.from_dict({"global_circuit_breaker_enabled": value})
+    assert config.global_circuit_breaker_enabled is False
+
+
+@pytest.mark.parametrize("value", [1, 0, "yes", [], {}])
+def test_rejects_invalid_shared_circuit_breaker_flag(value) -> None:
+    with pytest.raises(ValueError, match="gateway.global_circuit_breaker_enabled must be true or false"):
+        GatewayConfig.from_dict({"global_circuit_breaker_enabled": value})
 
 
 def test_streamable_http_defaults_to_concurrent_requests(tmp_path) -> None:
@@ -29,6 +47,7 @@ upstreams:
     assert config.gateway.public_tools_catalog is False
     assert config.gateway.public_metrics is False
     assert config.gateway.tracing_enabled is False
+    assert config.gateway.global_circuit_breaker_enabled is False
     assert config.gateway.readiness_mode == "any"
     assert config.gateway.required_ready_upstreams == []
     assert config.gateway.readiness_min_healthy_upstreams is None
