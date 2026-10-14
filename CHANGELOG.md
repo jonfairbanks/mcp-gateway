@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.0.2 (2026-10-13)
+
+### Bug Fixes
+
+- **gateway**: Isolate failures and validate tool routing
+  ([`68e29d1`](https://github.com/jonfairbanks/mcp-gateway/commit/68e29d1f0051c6deae4a7c0916c38d8c7967a2cd))
+
+
 ## v1.0.1 (2026-10-13)
 
 ### Bug Fixes
