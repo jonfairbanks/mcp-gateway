@@ -530,18 +530,15 @@ class HttpServer:
     async def run(self) -> None:
         app = self.build_app()
         runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, self._config.gateway.listen_host, self._config.gateway.listen_port)
-        await site.start()
-        self._logger.info(
-            "http_server_started",
-            host=self._config.gateway.listen_host,
-            port=self._config.gateway.listen_port,
-        )
         try:
-            while True:
-                await asyncio.sleep(3600)
-        except asyncio.CancelledError:
-            pass
+            await runner.setup()
+            site = web.TCPSite(runner, self._config.gateway.listen_host, self._config.gateway.listen_port)
+            await site.start()
+            self._logger.info(
+                "http_server_started",
+                host=self._config.gateway.listen_host,
+                port=self._config.gateway.listen_port,
+            )
+            await asyncio.Event().wait()
         finally:
             await runner.cleanup()

@@ -49,7 +49,7 @@ def test_stdio_only_inherits_runtime_environment(monkeypatch, explicit):
     monkeypatch.setenv("NODE_OPTIONS", "fixture-options")
     monkeypatch.setenv("PATH", "/fixture/bin")
     monkeypatch.setenv("HOME", "/fixture/home")
-    process = SimpleNamespace(returncode=0, stderr=None)
+    process = SimpleNamespace(returncode=0, stdout=None, stderr=None, wait=AsyncMock(return_value=0))
     spawn = AsyncMock(return_value=process)
     monkeypatch.setattr("mcp_gateway.upstreams.asyncio.create_subprocess_exec", spawn)
 
