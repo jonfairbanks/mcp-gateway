@@ -88,7 +88,7 @@ jobs:
           PR_URL: ${{ steps.release.outputs.pr_url }}
           HEAD_SHA: ${{ steps.release.outputs.head_sha }}
         run: |
-          required="$(gh api "repos/$GH_REPO/branches/main/rules" --jq \
+          required="$(gh api "repos/$GH_REPO/rules/branches/main" --jq \
             '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context] | unique')"
           if [ "$(jq 'length' <<< "$required")" -eq 0 ]; then
             echo "No required checks found; refusing to merge." >&2
