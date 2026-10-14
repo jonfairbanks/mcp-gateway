@@ -133,3 +133,40 @@ def test_notification_reinitializes_replacement_without_duplicate_initialized(tm
     pid = rows[-1]["pid"]
     assert [row["request"]["method"] for row in rows if row["pid"] == pid] == [
         "initialize", "notifications/initialized", "tools/call"]
+
+
+@pytest.mark.parametrize("malformed", ["utf8", "json", "array", "null", "string", "number", "oversized", "unterminated",
+                                      "huge_integer", "deep_nesting"])
+def test_malformed_stdout_resets_session_without_replaying_call(tmp_path, malformed):
+    journal = tmp_path / "requests.jsonl"
+    gateway, upstream = _gateway(journal)
+    upstream.stdio_read_limit_bytes = 64 * 1024
+
+    async def run():
+        await gateway.warmup()
+        client = await gateway._get_upstream_client(upstream)
+        process = client._process
+        try:
+            failed = await asyncio.wait_for(gateway._execute_upstream_operation(
+                upstream, "tools/call", _call("malformed", malformed_response=malformed)), 5)
+            assert not failed.success
+            assert failed.error["code"] == -32004
+            assert client._process is None
+            assert client._stderr_task is None
+            assert not client._initialized
+            assert not client._initialize_complete
+            assert process.returncode is not None
+            response = await gateway._execute_upstream_operation(
+                upstream, "tools/call", _call("recovered", value="good"))
+            assert response.success
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+    rows = _journal(journal)
+    starts = [row for row in rows if row["request"]["method"] == "initialize"]
+    assert len(starts) == 2
+    replacement = [row["request"] for row in rows if row["pid"] == starts[1]["pid"]]
+    assert [request["method"] for request in replacement] == [
+        "initialize", "notifications/initialized", "tools/call"]
+    assert sum(row["request"].get("id") == "malformed" for row in rows) == 1

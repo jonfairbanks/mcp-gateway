@@ -4,7 +4,10 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import sys
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
@@ -13,6 +16,7 @@ from dotenv import load_dotenv
 from .auth import AuthService
 from .config import (
     AUTH_MODE_POSTGRES_API_KEYS,
+    AppConfig,
     load_config,
 )
 from .gateway import Gateway
@@ -166,6 +170,60 @@ async def _run_cache_cleanup_loop(store: PostgresStore, logger: Logger) -> None:
 
 
 async def _run_http(config_path: str) -> None:
+    loop = asyncio.get_running_loop()
+    serving_task = asyncio.current_task()
+    assert serving_task is not None
+    previous_handler = signal.getsignal(signal.SIGTERM)
+    terminating = False
+
+    def terminate() -> None:
+        nonlocal terminating
+        if not terminating:
+            terminating = True
+            serving_task.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, terminate)
+    try:
+        await _serve_http(config_path)
+    except asyncio.CancelledError:
+        if not terminating:
+            raise
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, previous_handler)
+
+
+@asynccontextmanager
+async def _gateway_resources(
+    config: AppConfig, logger: Logger, dsn: str,
+) -> AsyncIterator[tuple[PostgresStore, GatewayTelemetry, Gateway]]:
+    async def close(resource, name: str) -> None:
+        try:
+            await resource.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("resource_close_failed", resource=name, error_type=type(exc).__name__, error=str(exc))
+            raise
+
+    async with AsyncExitStack() as cleanup:
+        store = PostgresStore(dsn)
+        cleanup.push_async_callback(close, store, "postgres")
+        await store.start()
+        telemetry = GatewayTelemetry(enabled=config.gateway.tracing_enabled)
+        cleanup.push_async_callback(close, telemetry, "telemetry")
+        gateway = Gateway(config, store, logger, telemetry)
+        cleanup.push_async_callback(close, gateway, "gateway")
+        yield store, telemetry, gateway
+
+
+async def _cancel_cleanup_task(task: asyncio.Task[None]) -> None:
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+async def _serve_http(config_path: str) -> None:
     dotenv_path = _load_environment()
     config = load_config(config_path)
     logger = Logger(stdout_json=config.logging.stdout_json)
@@ -180,30 +238,17 @@ async def _run_http(config_path: str) -> None:
             reason="DATABASE_URL not set",
             impact="postgres logging and persistent cache are disabled",
         )
-    store = PostgresStore(dsn)
-    await store.start()
-    telemetry = GatewayTelemetry(enabled=config.gateway.tracing_enabled)
-    gateway = Gateway(config, store, logger, telemetry)
-    cache_cleanup_task: asyncio.Task[None] | None = None
-    try:
-        await gateway.warmup()
-        startup_summary = gateway.startup_summary()
-        logger.info("startup_summary", **startup_summary)
-        logger.pretty_startup_summary(startup_summary)
-        if dsn:
-            cache_cleanup_task = asyncio.create_task(_run_cache_cleanup_loop(store, logger))
-        server = HttpServer(config, gateway, logger, telemetry)
-        await server.run()
-    finally:
-        if cache_cleanup_task:
-            cache_cleanup_task.cancel()
-            try:
-                await cache_cleanup_task
-            except asyncio.CancelledError:
-                pass
-        await gateway.close()
-        await telemetry.close()
-        await store.close()
+    async with _gateway_resources(config, logger, dsn) as (store, telemetry, gateway):
+        async with AsyncExitStack() as cleanup:
+            await gateway.warmup()
+            startup_summary = gateway.startup_summary()
+            logger.info("startup_summary", **startup_summary)
+            logger.pretty_startup_summary(startup_summary)
+            if dsn:
+                task = asyncio.create_task(_run_cache_cleanup_loop(store, logger))
+                cleanup.push_async_callback(_cancel_cleanup_task, task)
+            server = HttpServer(config, gateway, logger, telemetry)
+            await server.run()
 
 
 async def _run_create_api_key(
@@ -262,9 +307,10 @@ def _run_validate_config(config_path: str) -> None:
     )
 
 
+@asynccontextmanager
 async def _open_gateway_context(
     config_path: str,
-) -> tuple[Logger, PostgresStore, GatewayTelemetry, Gateway]:
+) -> AsyncIterator[tuple[Logger, PostgresStore, GatewayTelemetry, Gateway]]:
     dotenv_path = _load_environment()
     config = load_config(config_path)
     logger = Logger(stdout_json=False)
@@ -273,11 +319,8 @@ async def _open_gateway_context(
     dsn = os.getenv("DATABASE_URL", "")
     if config.gateway.auth_mode == AUTH_MODE_POSTGRES_API_KEYS:
         _validate_database_runtime(config, logger, dsn)
-    store = PostgresStore(dsn)
-    await store.start()
-    telemetry = GatewayTelemetry(enabled=config.gateway.tracing_enabled)
-    gateway = Gateway(config, store, logger, telemetry)
-    return logger, store, telemetry, gateway
+    async with _gateway_resources(config, logger, dsn) as (store, telemetry, gateway):
+        yield logger, store, telemetry, gateway
 
 
 async def _open_auth_context(config_path: str) -> tuple[Logger, PostgresStore, AuthService]:
@@ -294,24 +337,14 @@ async def _open_auth_context(config_path: str) -> tuple[Logger, PostgresStore, A
 
 
 async def _run_warmup_check(config_path: str) -> None:
-    _, store, telemetry, gateway = await _open_gateway_context(config_path)
-    try:
+    async with _open_gateway_context(config_path) as (_, _, _, gateway):
         await gateway.warmup()
         _print_json(gateway.startup_summary())
-    finally:
-        await gateway.close()
-        await telemetry.close()
-        await store.close()
 
 
 async def _run_list_integrations(config_path: str) -> None:
-    _, store, telemetry, gateway = await _open_gateway_context(config_path)
-    try:
+    async with _open_gateway_context(config_path) as (_, _, _, gateway):
         _print_json({"items": await gateway.list_integrations()})
-    finally:
-        await gateway.close()
-        await telemetry.close()
-        await store.close()
 
 
 def main() -> None:

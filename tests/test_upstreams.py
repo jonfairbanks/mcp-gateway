@@ -272,3 +272,216 @@ def test_http_json_and_sse_byte_boundary_includes_framing(encoding, over_limit):
             asyncio.run(client.call({"id": 7, "method": "tools/list"}))
     else:
         assert asyncio.run(client.call({"id": 7, "method": "tools/list"})).payload == payload
+
+
+@pytest.mark.parametrize("callback_raises", [False, True])
+def test_stdio_oversized_stderr_keeps_draining(callback_raises, caplog):
+    lines = []
+
+    def log_line(upstream_id, text):
+        lines.append((upstream_id, text))
+        if callback_raises:
+            raise ValueError("Broken logging callback")
+
+    client = upstreams.StdioUpstream(
+        [sys.executable, str(FIXTURE_STDIO_UPSTREAM)], {}, None, 2000, 64 * 1024,
+        "stdio-fixture", log_line)
+
+    async def run():
+        try:
+            response = await client.call({"jsonrpc": "2.0", "id": "noisy", "method": "tools/call",
+                                          "params": {"arguments": {"stderr_bytes": 2 * 1024 * 1024}}})
+            assert response.success
+            async with asyncio.timeout(2):
+                while len(lines) < 2:
+                    await asyncio.sleep(0.01)
+            assert not client._stderr_task.done()
+            process = client._process
+        finally:
+            await client.close()
+        assert process.returncode is not None
+        assert client._process is None
+        assert client._stderr_task is None
+
+    asyncio.run(run())
+    assert lines == [("stdio-fixture", "x" * (64 * 1024) + " [truncated]"),
+                     ("stdio-fixture", "after oversized line")]
+    failures = [record for record in caplog.records if "stderr callback failed" in record.message]
+    assert len(failures) == int(callback_raises)
+
+
+@pytest.mark.parametrize("cleanup", ["close", "restart", "timeout"])
+def test_stdio_failed_stderr_reader_does_not_abort_cleanup(cleanup, caplog):
+    client = upstreams.StdioUpstream(
+        [sys.executable, str(FIXTURE_STDIO_UPSTREAM)], {}, None, 1000, 64 * 1024, "stdio-fixture")
+
+    async def failed_reader():
+        raise OSError("Broken stderr reader")
+
+    async def run():
+        await client.start()
+        process = client._process
+        client._stderr_task.cancel()
+        await asyncio.gather(client._stderr_task, return_exceptions=True)
+        client._stderr_task = asyncio.create_task(failed_reader())
+        await asyncio.sleep(0)
+        assert client._stderr_task.done()
+        try:
+            if cleanup == "close":
+                await client.close()
+            elif cleanup == "restart":
+                process.terminate()
+                await process.wait()
+                await client.start()
+                assert client._process.pid != process.pid
+                await client.close()
+            else:
+                client._timeout = 0.05
+                with pytest.raises(asyncio.TimeoutError):
+                    await client.call({"jsonrpc": "2.0", "id": "slow", "method": "tools/call",
+                                       "params": {"arguments": {"delay_seconds": 5}}})
+            assert process.returncode is not None
+            assert client._process is None
+            assert client._stderr_task is None
+            assert not client._initialized
+            assert not client._initialize_complete
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+    failures = [record for record in caplog.records if "stderr reader failed" in record.message]
+    assert len(failures) == 1
+
+
+def test_stdio_ignores_valid_notifications_and_unmatched_responses():
+    client = upstreams.StdioUpstream(
+        [sys.executable, str(FIXTURE_STDIO_UPSTREAM)], {}, None, 1000, 64 * 1024, "stdio-fixture")
+
+    async def run():
+        try:
+            response = await client.call({"jsonrpc": "2.0", "id": "expected", "method": "tools/call",
+                                          "params": {"arguments": {"stdout_noise": True, "value": "ok"}}})
+            assert response.success
+            assert response.payload["id"] == "expected"
+            assert response.payload["result"]["content"][0]["text"] == "stdio.echo:ok"
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stage", ["stderr", "wait"])
+@pytest.mark.parametrize("repeat_cancel", [False, True])
+def test_stdio_close_finishes_cleanup_before_propagating_cancellation(monkeypatch, stage, repeat_cancel):
+    client = upstreams.StdioUpstream(
+        [sys.executable, str(FIXTURE_STDIO_UPSTREAM)], {}, None, 1000, 64 * 1024, "stdio-fixture")
+
+    async def run():
+        await client.start()
+        process = client._process
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        if stage == "stderr":
+            client._stderr_task.cancel()
+            await asyncio.gather(client._stderr_task, return_exceptions=True)
+
+            async def delayed_stderr():
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    entered.set()
+                    await release.wait()
+
+            client._stderr_task = asyncio.create_task(delayed_stderr())
+            await asyncio.sleep(0)
+        else:
+            original_wait = process.wait
+
+            async def delayed_wait():
+                entered.set()
+                await release.wait()
+                return await original_wait()
+
+            monkeypatch.setattr(process, "wait", delayed_wait)
+        closing = asyncio.create_task(client.close())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            closing.cancel()
+            await asyncio.sleep(0)
+            assert client._process is process
+            assert client._stderr_task is not None
+            concurrent_close = asyncio.create_task(client.close())
+            if repeat_cancel:
+                closing.cancel()
+                await asyncio.sleep(0)
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(closing, 3)
+            await asyncio.wait_for(concurrent_close, 3)
+            assert process.returncode is not None
+            assert client._process is None
+            assert client._stderr_task is None
+            assert client._close_task is None
+            await client.close()
+        finally:
+            release.set()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_stdio_close_cancelled_on_first_yield_still_reaps_child():
+    client = upstreams.StdioUpstream(
+        [sys.executable, str(FIXTURE_STDIO_UPSTREAM)], {}, None, 1000, 64 * 1024, "stdio-fixture")
+
+    async def run():
+        await client.start()
+        process = client._process
+        closing = asyncio.create_task(client.close())
+        asyncio.get_running_loop().call_soon(closing.cancel)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(closing, 3)
+            assert process.returncode is not None
+            assert client._process is None
+            assert client._stderr_task is None
+            assert client._close_task is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_stdio_start_waits_for_pending_close_before_replacing_child(monkeypatch):
+    client = upstreams.StdioUpstream(
+        [sys.executable, str(FIXTURE_STDIO_UPSTREAM)], {}, None, 1000, 64 * 1024, "stdio-fixture")
+
+    async def run():
+        await client.start()
+        process = client._process
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_wait = process.wait
+
+        async def delayed_wait():
+            entered.set()
+            await release.wait()
+            return await original_wait()
+
+        monkeypatch.setattr(process, "wait", delayed_wait)
+        closing = asyncio.create_task(client.close())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            starting = asyncio.create_task(client.start())
+            await asyncio.sleep(0)
+            assert not starting.done()
+            assert client._process is process
+            release.set()
+            await asyncio.wait_for(asyncio.gather(closing, starting), 3)
+            assert process.returncode is not None
+            assert client._process.pid != process.pid
+        finally:
+            release.set()
+            await client.close()
+
+    asyncio.run(run())

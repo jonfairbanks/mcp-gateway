@@ -12,6 +12,12 @@ Readiness policies:
 - `required` marks the gateway ready only when every upstream listed in `gateway.required_ready_upstreams` is healthy
 - `threshold` marks the gateway ready when the configured healthy-count and/or healthy-percent threshold is met
 
+## Shutdown
+
+SIGTERM and Ctrl+C run the gateway cleanup path, including during upstream warmup. The HTTP runner, upstream sessions, telemetry and Postgres are closed even if another resource fails to close.
+
+Stdio children get two seconds to exit after termination before being killed. Invalid stdout resets the session; interrupted tool calls are never replayed. Stderr lines longer than 64 KiB are truncated in logs while the pipe keeps draining.
+
 ## Metrics
 
 Prometheus metrics keep `upstream_id` so MCP usage is easy to query by integration.
