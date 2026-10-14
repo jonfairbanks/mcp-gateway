@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.0.3 (2026-10-13)
+
+### Bug Fixes
+
+- **ci**: Correct branch rules API paths
+  ([`b2821cd`](https://github.com/jonfairbanks/mcp-gateway/commit/b2821cdd5a83a7495053b69f321be8093bae97fa))
+
+
 ## v1.0.2 (2026-10-13)
 
 ### Bug Fixes
