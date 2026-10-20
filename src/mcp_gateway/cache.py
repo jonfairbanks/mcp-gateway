@@ -37,7 +37,3 @@ class TTLCache:
             self._entries.move_to_end(key)
             while len(self._entries) > self._max_entries:
                 self._entries.popitem(last=False)
-
-    async def delete(self, key: str) -> None:
-        async with self._lock:
-            self._entries.pop(key, None)

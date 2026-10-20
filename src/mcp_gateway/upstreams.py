@@ -26,12 +26,6 @@ class UpstreamResponse:
     success: bool
 
 
-@dataclass
-class SseEvent:
-    event: str
-    data: str
-
-
 class StreamableHTTPUpstream:
     MAX_SSE_LINES = 16384
     MAX_SSE_EVENTS = 1024
@@ -195,8 +189,7 @@ class StreamableHTTPUpstream:
         return stripped.startswith("event:") or stripped.startswith("data:") or "\nevent:" in raw_text or "\ndata:" in raw_text
 
     @classmethod
-    def _parse_sse_events(cls, raw_text: str) -> Iterator[SseEvent]:
-        event_name = "message"
+    def _parse_sse_events(cls, raw_text: str) -> Iterator[str]:
         data_lines: list[str] = []
         event_count = 0
         line_count = 0
@@ -212,8 +205,7 @@ class StreamableHTTPUpstream:
                     event_count += 1
                     if event_count > cls.MAX_SSE_EVENTS:
                         raise RuntimeError("HTTP upstream SSE event limit exceeded")
-                    yield SseEvent(event=event_name, data="\n".join(data_lines))
-                event_name = "message"
+                    yield "\n".join(data_lines)
                 data_lines = []
                 continue
             if line.startswith(":"):
@@ -223,23 +215,21 @@ class StreamableHTTPUpstream:
                 continue
             if value.startswith(" "):
                 value = value[1:]
-            if field == "event":
-                event_name = value or "message"
-            elif field == "data":
+            if field == "data":
                 data_lines.append(value)
         if data_lines:
             if event_count >= cls.MAX_SSE_EVENTS:
                 raise RuntimeError("HTTP upstream SSE event limit exceeded")
-            yield SseEvent(event=event_name, data="\n".join(data_lines))
+            yield "\n".join(data_lines)
 
     @classmethod
     def _extract_sse_payload(cls, raw_text: str, expected_id: Any) -> Optional[Dict[str, Any]]:
         candidate: Optional[Dict[str, Any]] = None
-        for event in cls._parse_sse_events(raw_text):
-            if not event.data:
+        for data in cls._parse_sse_events(raw_text):
+            if not data:
                 continue
             try:
-                decoded = json.loads(event.data)
+                decoded = json.loads(data)
             except json.JSONDecodeError:
                 continue
             if not isinstance(decoded, dict):
@@ -288,7 +278,7 @@ class StdioUpstream:
             if self._process and self._process.returncode is None:
                 return
             if self._process and self._process.returncode is not None:
-                await self._discard_dead_process()
+                await self.close()
             self._initialize_complete = False
             self._initialized = False
             # Only runtime necessities are inherited. Credentials must be explicitly
@@ -307,9 +297,6 @@ class StdioUpstream:
             )
             self._stderr_callback_failure_reported = False
             self._stderr_task = asyncio.create_task(self._stream_stderr())
-
-    async def _discard_dead_process(self) -> None:
-        await self.close()
 
     @staticmethod
     async def _drain_pipe(stream: asyncio.StreamReader) -> None:

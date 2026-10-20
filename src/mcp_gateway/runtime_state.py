@@ -29,19 +29,11 @@ class GatewayRuntimeState:
     def upstream_breakers(self) -> Dict[str, Dict[str, float]]:
         return self._upstream_breakers
 
-    @upstream_breakers.setter
-    def upstream_breakers(self, value: Dict[str, Dict[str, float]]) -> None:
-        self._upstream_breakers = value
-
     @property
     def global_breaker(self) -> Dict[str, float]:
         return self._global_breaker
 
-    @global_breaker.setter
-    def global_breaker(self, value: Dict[str, float]) -> None:
-        self._global_breaker = value
-
-    async def record_health(self, upstream_id: str, method: str, success: bool) -> None:
+    async def record_health(self, upstream_id: str, success: bool) -> None:
         async with self._breaker_lock:
             upstream_cfg = self._upstream_by_id.get(upstream_id)
             upstream_state = self._upstream_breakers.setdefault(upstream_id, {"consecutive_failures": 0, "open_until": 0.0})

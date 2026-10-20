@@ -92,7 +92,6 @@ class UpstreamExecution:
 
 @dataclass
 class WarmupResult:
-    upstream: UpstreamConfig
     initialize_success: bool
     initialize_error: Optional[Dict[str, Any]]
     initialize_capabilities: Dict[str, Any]
@@ -140,17 +139,9 @@ class Gateway:
     def _upstream_breakers(self) -> Dict[str, Dict[str, float]]:
         return self._runtime.upstream_breakers
 
-    @_upstream_breakers.setter
-    def _upstream_breakers(self, value: Dict[str, Dict[str, float]]) -> None:
-        self._runtime.upstream_breakers = value
-
     @property
     def _global_breaker(self) -> Dict[str, float]:
         return self._runtime.global_breaker
-
-    @_global_breaker.setter
-    def _global_breaker(self, value: Dict[str, float]) -> None:
-        self._runtime.global_breaker = value
 
     async def close(self) -> None:
         async def close_client(upstream_id: str, client: StreamableHTTPUpstream | StdioUpstream) -> None:
@@ -430,7 +421,7 @@ class Gateway:
         self, upstream_id: str, method: str, success: bool, *, breaker_rejected: bool = False,
     ) -> None:
         if not breaker_rejected:
-            await self._runtime.record_health(upstream_id, method, success)
+            await self._runtime.record_health(upstream_id, success)
         self._telemetry.record_upstream_outcome(upstream_id, method, success)
 
     def _get_tool_name(self, method: str, params: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -901,7 +892,6 @@ class Gateway:
             cache_hit=cache_hit,
             latency_ms=latency_ms,
             upstream_id=upstream_id,
-            tool_name=tool_name,
         )
         self._telemetry.annotate_mcp_result(
             request_id=str(request_id),
@@ -1175,7 +1165,6 @@ class Gateway:
             tools_list_error = None
         await self._record_health(upstream.id, "tools/list", tools_list_success, breaker_rejected=tools_execution.breaker_rejected)
         return WarmupResult(
-            upstream=upstream,
             initialize_success=init_success,
             initialize_error=init_error,
             initialize_capabilities=init_capabilities,
@@ -1471,7 +1460,7 @@ class Gateway:
                 )
                 denial_id = uuid4()
                 await self._safe_log_denial(denial_id, request_id, routed.upstream.id, routed.tool_name, denial_reason)
-                self._telemetry.record_denial(routed.upstream.id, routed.tool_name)
+                self._telemetry.record_denial(routed.upstream.id)
                 return await self._finalize_request(
                     request_id=request_id,
                     method=method,
