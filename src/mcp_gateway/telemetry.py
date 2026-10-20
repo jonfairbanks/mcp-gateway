@@ -265,7 +265,6 @@ class GatewayTelemetry:
         cache_hit: bool,
         latency_ms: int,
         upstream_id: Optional[str],
-        tool_name: Optional[str],
     ) -> None:
         attrs = {
             "method": _prometheus_method(method),
@@ -282,7 +281,7 @@ class GatewayTelemetry:
                 cache_hit=str(cache_hit).lower(),
             ).inc()
 
-    def record_denial(self, upstream_id: Optional[str], tool_name: Optional[str]) -> None:
+    def record_denial(self, upstream_id: Optional[str]) -> None:
         self._prom_denials_total.labels(upstream_id=upstream_id or "none").inc()
 
     def record_upstream_outcome(self, upstream_id: str, method: str, success: bool) -> None:

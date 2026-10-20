@@ -20,7 +20,6 @@ def test_prometheus_metrics_drop_tool_name_labels_but_keep_upstream_counts() -> 
         cache_hit=False,
         latency_ms=12,
         upstream_id="context7",
-        tool_name="query-docs",
     )
     telemetry.record_response(
         method="tools/call",
@@ -28,9 +27,8 @@ def test_prometheus_metrics_drop_tool_name_labels_but_keep_upstream_counts() -> 
         cache_hit=True,
         latency_ms=3,
         upstream_id="grafana",
-        tool_name="query_loki_logs",
     )
-    telemetry.record_denial("context7", "query-docs")
+    telemetry.record_denial("context7")
 
     rendered = telemetry.render_prometheus().decode("utf-8")
 
@@ -47,7 +45,7 @@ def test_prometheus_metrics_bound_attacker_controlled_method_labels() -> None:
     for index in range(100):
         method = f"extension/attacker-controlled-{index}"
         telemetry.record_request(method)
-        telemetry.record_response(method, False, False, 1, None, None)
+        telemetry.record_response(method, False, False, 1, None)
         telemetry.record_upstream_outcome("configured-upstream", method, False)
 
     rendered = telemetry.render_prometheus().decode("utf-8")
