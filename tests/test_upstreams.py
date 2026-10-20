@@ -130,6 +130,21 @@ def test_http_upstream_call_parses_sse_response_and_ignores_notifications() -> N
     assert client._session_id == "session-123"
 
 
+def test_http_upstream_sse_ignores_event_names_and_keeps_unterminated_multiline_response() -> None:
+    body = (
+        'event: progress\r\ndata: {"method":"notifications/progress"}\r\n\r\n'
+        'event: custom-result\r\nid: ignored\r\nretry: 500\r\n'
+        'data: {"id":7,\r\ndata: "result":{"ok":true}}'
+    )
+    client = upstreams.StreamableHTTPUpstream("https://example.com/mcp", 1000)
+    client._session = FakeClientSession([FakeResponse(200, body)])
+
+    response = asyncio.run(client.call({"jsonrpc": "2.0", "id": 7, "method": "ping"}))
+
+    assert response.success is True
+    assert response.payload == {"id": 7, "result": {"ok": True}}
+
+
 def test_http_upstream_accepts_supported_protocol_version_from_initialize_result() -> None:
     client = upstreams.StreamableHTTPUpstream("https://example.com/mcp", 1000)
     client._session = FakeClientSession(
