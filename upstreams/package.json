@@ -3,6 +3,6 @@
   "private": true,
   "version": "1.0.0",
   "dependencies": {
-    "@upstash/context7-mcp": "4.3.0"
+    "@upstash/context7-mcp": "4.4.4"
   }
 }
